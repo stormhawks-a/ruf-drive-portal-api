@@ -3,6 +3,19 @@
 function folders_list(array $params): void
 {
     $user = Auth::requireAuth();
+
+    if (isset($_GET['all'])) {
+        $rows = Db::query('SELECT * FROM folders ORDER BY created_at ASC');
+        if ($user['role'] === 'CUSTOMER') {
+            $rootId = $user['folder_id'];
+            $rows = array_values(array_filter($rows, function ($f) use ($rootId) {
+                return $f['id'] === $rootId || Scope::isWithinCustomerRoot($f['id'], $rootId);
+            }));
+        }
+        Response::json(['folders' => $rows]);
+        return;
+    }
+
     $parentId = $_GET['parentId'] ?? null;
 
     if ($user['role'] === 'CUSTOMER') {

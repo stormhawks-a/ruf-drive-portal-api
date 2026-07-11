@@ -8,7 +8,9 @@ Bu adımları sırayla uygula. Her adımda ne tıklayacağını/gireceğini gör
 2. "Yeni Veritabanı" alanına bir isim yaz (örn. `ruf_portal`) → Oluştur.
 3. Aynı sayfada "MySQL Kullanıcıları" bölümünden yeni bir kullanıcı oluştur (örn. `ruf_portal_user`), **güçlü bir şifre** üret ve not al.
 4. "Kullanıcıyı Veritabanına Ekle" ile az önce oluşturduğun kullanıcıyı veritabanına bağla, yetkilerde **ALL PRIVILEGES** seç.
-5. cPanel genelde veritabanı/kullanıcı adının önüne otomatik olarak `cpaneluser_` gibi bir önek ekler — gerçek tam isimler (örn. `natrocpaneluser_ruf_portal`) bir sonraki adımda lazım olacak, not al.
+5. cPanel genelde veritabanı/kullanıcı adının önüne otomatik olarak `cpaneluser_` gibi bir önek ekler — gerçek tam isimler (örn. `natrocpaneluser_ruf_portal`) bir sonraki adımda lazım olacak, not al. 
+
+u2756030_ruf_portal
 
 ## 2) Şemayı yükle
 
@@ -57,6 +59,28 @@ curl -i -c cookies.txt -X POST https://<adres>/api/login \
   -d '{"email":"admin","password":"<seed.php cikti sifresi>"}'
 ```
 Admin bilgilerini JSON olarak döndürmeli.
+
+## 7) DNS (Cloudflare) — teslim.workonruf.com'u yayına almak için
+
+`workonruf.com`'un gerçek DNS yönetimi Natro'da değil, **Cloudflare**'de (nameserver'lar Cloudflare'e ait). Bu yüzden Natro cPanel'de subdomain oluşturmak DNS'i otomatik güncellemiyor — Cloudflare'de manuel bir kayıt gerekiyor:
+
+1. Cloudflare → DNS → Records → **Add record**: Type `A`, Name `teslim`, IPv4 `94.73.151.149` (Natro sunucu IP'si).
+2. SSL: Natro tarafında bu hesapta **hiçbir alan adı için AutoSSL/ücretsiz sertifika yok** (paylaşımlı hosting kısıtlaması, "Run AutoSSL" butonu bile yok). Çözüm: Cloudflare proxy'sini (turuncu bulut) aç, **SSL/TLS → Overview → Flexible** moduna al. Böylece tarayıcı-Cloudflare arası HTTPS çalışır, Cloudflare-Natro arası düz HTTP kullanılır (Natro'da sertifika gerekmez).
+
+## 8) Bilinen sorun / Natro desteği gerekiyor (11 Temmuz 2026 itibarıyla ÇÖZÜLMEDİ)
+
+Yukarıdaki 1-4. adımlar tamamlandı: veritabanı, şema, `config.php`, GitHub + cPanel Git klonlama — hepsi doğru ve doğrulandı (Dosya Yöneticisi'nde `api/` altında tüm dosyalar mevcut, doğru izinlerle 644/755).
+
+Ancak **5. ve 6. adımlara hiç geçilemedi** çünkü `https://teslim.workonruf.com/api/...` altındaki HİÇBİR dosyaya (hatta düz bir `.txt` test dosyasına bile) ulaşılamıyor — hepsi 404 dönüyor. Bu, `.htaccess`/PHP ile ilgili değil (düz metin dosyası da aynı hatayı veriyor); Natro'nun web sunucusunun (Apache/LiteSpeed) bu alt alan adı için sanal sunucu (vhost) yapılandırmasını doğru kurmamış/güncellememiş olması ihtimali yüksek.
+
+Denenen ve işe yaramayan self-servis çözümler:
+- cPanel'de alt alan adını silip aynı Belge Kök Dizini (`/teslim.workonruf.com`) ile yeniden oluşturmak (vhost'u "resetlemek")
+- Cloudflare Flexible SSL ile SSL'i devre dışı bırakıp saf HTTP üzerinden test etmek
+
+**Sıradaki adım**: Natro destek/canlı desteğe şu talebi iletmek:
+> "teslim.workonruf.com alt alan adının Belge Kök Dizini `/teslim.workonruf.com` olarak ayarlı ve içinde gerçek dosyalar var (örn. `/teslim.workonruf.com/api/ping.txt`), fakat bu adrese giriş yaptığımda "404 Not Found" alıyorum. Alt alan adını silip yeniden oluşturdum ama sorun devam ediyor. Bu alt alan adı için Apache/LiteSpeed sanal sunucu (vhost) yapılandırmasını kontrol edip yeniden oluşturabilir misiniz (rebuildhttpdconf)?"
+
+Natro bunu çözdükten sonra buradan, 5. adımdan devam edilecek.
 
 ---
 

@@ -7,6 +7,19 @@
 function files_list(array $params): void
 {
     $user = Auth::requireAuth();
+
+    if (isset($_GET['all'])) {
+        $rows = Db::query('SELECT * FROM files ORDER BY created_at ASC');
+        if ($user['role'] === 'CUSTOMER') {
+            $rootId = $user['folder_id'];
+            $rows = array_values(array_filter($rows, function ($f) use ($rootId) {
+                return Scope::isWithinCustomerRoot($f['parent_id'], $rootId);
+            }));
+        }
+        Response::json(['files' => $rows]);
+        return;
+    }
+
     $parentId = $_GET['parentId'] ?? null;
 
     if ($parentId === null) {
