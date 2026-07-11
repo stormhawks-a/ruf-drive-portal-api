@@ -64,7 +64,7 @@ Admin bilgilerini JSON olarak döndürmeli.
 
 `workonruf.com`'un gerçek DNS yönetimi Natro'da değil, **Cloudflare**'de (nameserver'lar Cloudflare'e ait). Bu yüzden Natro cPanel'de subdomain oluşturmak DNS'i otomatik güncellemiyor — Cloudflare'de manuel bir kayıt gerekiyor:
 
-1. Cloudflare → DNS → Records → **Add record**: Type `A`, Name `teslim`, IPv4 `94.73.151.149` (Natro sunucu IP'si).
+1. Cloudflare → DNS → Records → **Add record**: Type `A`, Name `teslim`, IPv4 `<NATRO_SUNUCU_IP>` (cPanel ana sayfasında "Paylaşılan IP Adresi" olarak görünür — bu değeri buraya yazma, .gitignore'lu yerel bir notta tut).
 2. SSL: Natro tarafında bu hesapta **hiçbir alan adı için AutoSSL/ücretsiz sertifika yok** (paylaşımlı hosting kısıtlaması, "Run AutoSSL" butonu bile yok). Çözüm: Cloudflare proxy'sini (turuncu bulut) aç, **SSL/TLS → Overview → Flexible** moduna al. Böylece tarayıcı-Cloudflare arası HTTPS çalışır, Cloudflare-Natro arası düz HTTP kullanılır (Natro'da sertifika gerekmez).
 
 ## 8) Bilinen sorun / Natro desteği gerekiyor (11 Temmuz 2026 itibarıyla ÇÖZÜLMEDİ)
