@@ -1,5 +1,16 @@
 <?php
 
+/** Drive parent id for a new folder: the parent folder's mirror, or the app-wide root if top-level. */
+function folders_resolve_drive_parent(?string $parentId): ?string
+{
+    if ($parentId !== null) {
+        $parent = Db::queryOne('SELECT drive_folder_id FROM folders WHERE id = ?', [$parentId]);
+        return $parent['drive_folder_id'] ?? null;
+    }
+    $setting = Db::queryOne('SELECT value FROM app_settings WHERE `key` = ?', ['drive_root_folder_id']);
+    return $setting['value'] ?? null;
+}
+
 function folders_list(array $params): void
 {
     $user = Auth::requireAuth();
@@ -55,6 +66,18 @@ function folders_create(array $params): void
     $id = Ids::generate('folder');
     Db::execute('INSERT INTO folders (id, name, parent_id) VALUES (?, ?, ?)', [$id, $name, $parentId]);
     AuditLogger::log($user['id'], $user['name'], $user['role'], 'FOLDER_CREATE', "Klasör oluşturuldu: {$name}");
+
+    // Best-effort Drive mirror: the folder already exists in our DB regardless of
+    // whether this succeeds, so a transient Drive/network error never blocks the user.
+    try {
+        $driveParentId = folders_resolve_drive_parent($parentId);
+        if ($driveParentId !== null) {
+            $driveFolderId = GoogleDriveClient::createFolder($name, $driveParentId);
+            Db::execute('UPDATE folders SET drive_folder_id = ? WHERE id = ?', [$driveFolderId, $id]);
+        }
+    } catch (Throwable $e) {
+        error_log('Drive klasor aynalama basarisiz: ' . $e->getMessage());
+    }
 
     $row = Db::queryOne('SELECT * FROM folders WHERE id = ?', [$id]);
     Response::json(['folder' => $row], 201);

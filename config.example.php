@@ -16,4 +16,12 @@ return [
     'session_name' => 'ruf_session',
     // Prod'da mutlaka true olmali (HTTPS zorunlu). Sadece yerel http test icin false.
     'secure_cookies' => true,
+    // Google Cloud Console > APIs & Services > Credentials'tan alinir (Faz 3).
+    'google' => [
+        'client_id' => 'CHANGE_ME',
+        'client_secret' => 'CHANGE_ME',
+        // oauth_authorize.php/oauth_callback.php'nin calistigi tam adresle birebir
+        // eslesmeli (Google Cloud Console'daki "Authorized redirect URIs" ile ayni).
+        'redirect_uri' => 'http://localhost:8899/oauth_callback.php',
+    ],
 ];

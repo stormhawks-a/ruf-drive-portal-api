@@ -13,6 +13,9 @@ require __DIR__ . '/lib/Ids.php';
 require __DIR__ . '/lib/Auth.php';
 require __DIR__ . '/lib/AuditLogger.php';
 require __DIR__ . '/lib/Scope.php';
+require __DIR__ . '/lib/Crypto.php';
+require __DIR__ . '/lib/GoogleOAuth.php';
+require __DIR__ . '/lib/GoogleDriveClient.php';
 
 set_exception_handler(function (Throwable $e): void {
     error_log($e->getMessage() . "\n" . $e->getTraceAsString());

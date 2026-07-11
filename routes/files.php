@@ -1,8 +1,24 @@
 <?php
 
-// Not: Bu asamada (Faz 1) dosya baytlari henuz Drive'a gitmiyor; sadece
-// metadata kaydediliyor. Gercek yukleme/indirme Faz 3'te GoogleDriveClient
-// ile bu route'lara eklenecek.
+function files_infer_type(string $name, string $mimeType): string
+{
+    $ext = strtolower((string) pathinfo($name, PATHINFO_EXTENSION));
+    $map = [
+        'pdf' => 'pdf',
+        'jpg' => 'image', 'jpeg' => 'image', 'png' => 'image', 'gif' => 'image', 'webp' => 'image', 'svg' => 'image',
+        'mp4' => 'video', 'mov' => 'video', 'avi' => 'video', 'webm' => 'video', 'mkv' => 'video',
+        'mp3' => 'audio', 'wav' => 'audio', 'ogg' => 'audio', 'm4a' => 'audio',
+        'doc' => 'doc', 'docx' => 'doc', 'txt' => 'doc', 'rtf' => 'doc',
+        'xls' => 'sheet', 'xlsx' => 'sheet', 'csv' => 'sheet',
+    ];
+    if (isset($map[$ext])) {
+        return $map[$ext];
+    }
+    if (str_starts_with($mimeType, 'image/')) return 'image';
+    if (str_starts_with($mimeType, 'video/')) return 'video';
+    if (str_starts_with($mimeType, 'audio/')) return 'audio';
+    return 'other';
+}
 
 function files_list(array $params): void
 {
@@ -34,33 +50,69 @@ function files_list(array $params): void
 function files_create(array $params): void
 {
     $user = Auth::requireAuth();
-    $body = Response::body();
 
-    $name = trim((string) ($body['name'] ?? ''));
-    $parentId = $body['parentId'] ?? null;
-    $fileType = (string) ($body['fileType'] ?? 'other');
-    $sizeBytes = (int) ($body['sizeBytes'] ?? 0);
-    $mimeType = $body['mimeType'] ?? null;
-
-    if ($name === '' || $parentId === null) {
-        Response::error('Dosya adı ve klasör zorunlu.', 422);
+    $parentId = $_POST['parentId'] ?? null;
+    if ($parentId === null || $parentId === '') {
+        Response::error('Klasör zorunlu.', 422);
     }
     Scope::assertFolderAccessible($user, $parentId);
 
-    $allowedTypes = ['pdf', 'image', 'video', 'audio', 'doc', 'sheet', 'other'];
-    if (!in_array($fileType, $allowedTypes, true)) {
-        $fileType = 'other';
+    if (!isset($_FILES['file']) || $_FILES['file']['error'] !== UPLOAD_ERR_OK) {
+        Response::error('Dosya yüklenemedi.', 422);
     }
+    $uploaded = $_FILES['file'];
+
+    $name = trim((string) ($_POST['name'] ?? $uploaded['name']));
+    if ($name === '') {
+        Response::error('Dosya adı zorunlu.', 422);
+    }
+    $mimeType = (string) ($uploaded['type'] ?: 'application/octet-stream');
+    $sizeBytes = (int) $uploaded['size'];
+    $fileType = files_infer_type($name, $mimeType);
 
     $id = Ids::generate('file');
+    $driveFileId = null;
+    try {
+        $driveParent = Db::queryOne('SELECT drive_folder_id FROM folders WHERE id = ?', [$parentId]);
+        $driveParentId = $driveParent['drive_folder_id'] ?? null;
+        if ($driveParentId !== null) {
+            $contents = file_get_contents($uploaded['tmp_name']);
+            $driveFileId = GoogleDriveClient::uploadFile($name, $driveParentId, $mimeType, $contents);
+        }
+    } catch (Throwable $e) {
+        error_log('Drive dosya yukleme basarisiz: ' . $e->getMessage());
+    }
+
     Db::execute(
-        'INSERT INTO files (id, name, original_name, size_bytes, mime_type, file_type, parent_id, owner_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [$id, $name, $name, $sizeBytes, $mimeType, $fileType, $parentId, $user['id']]
+        'INSERT INTO files (id, name, original_name, size_bytes, mime_type, file_type, parent_id, owner_id, drive_file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [$id, $name, $uploaded['name'], $sizeBytes, $mimeType, $fileType, $parentId, $user['id'], $driveFileId]
     );
     AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_UPLOAD', "Dosya eklendi: {$name}");
 
     $row = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
     Response::json(['file' => $row], 201);
+}
+
+function files_download(array $params): void
+{
+    $user = Auth::requireAuth();
+    $id = $params['id'];
+    $file = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
+    if ($file === null) {
+        Response::error('Dosya bulunamadı.', 404);
+    }
+    Scope::assertFolderAccessible($user, $file['parent_id']);
+
+    if ($file['drive_file_id'] === null) {
+        Response::error('Bu dosya için depolanmış bir kopya yok.', 404);
+    }
+
+    AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_DOWNLOAD', "Dosya indirildi: {$file['name']}");
+
+    header('Content-Type: ' . ($file['mime_type'] ?: 'application/octet-stream'));
+    header('Content-Disposition: attachment; filename="' . str_replace('"', '', $file['name']) . '"');
+    GoogleDriveClient::streamFile($file['drive_file_id']);
+    exit;
 }
 
 function files_update(array $params): void
@@ -111,6 +163,7 @@ function files_restore(array $params): void
 return [
     ['GET', '#^/files$#', 'files_list'],
     ['POST', '#^/files$#', 'files_create'],
+    ['GET', '#^/files/(?P<id>[a-zA-Z0-9_]+)/download$#', 'files_download'],
     ['PUT', '#^/files/(?P<id>[a-zA-Z0-9_]+)$#', 'files_update'],
     ['DELETE', '#^/files/(?P<id>[a-zA-Z0-9_]+)$#', 'files_delete'],
     ['POST', '#^/files/(?P<id>[a-zA-Z0-9_]+)/restore$#', 'files_restore'],
