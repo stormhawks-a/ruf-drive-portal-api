@@ -82,6 +82,20 @@ Denenen ve işe yaramayan self-servis çözümler:
 
 Natro bunu çözdükten sonra buradan, 5. adımdan devam edilecek.
 
+## 9) Faz 3: Google Drive bağlantısını canlıya taşıma
+
+Faz 3 (gerçek Drive yükleme/indirme/klasör eşleme) yerelde tamamen kuruldu ve test edildi — bunu Natro düzelince canlıya taşımak için:
+
+1. **Google Cloud Console → APIs & Services → Credentials'a** gir, oluşturduğumuz OAuth Client ID'yi aç, **Authorized redirect URIs** listesine şunu da ekle (yerelinki silinmeden):
+   `https://teslim.workonruf.com/api/oauth_callback.php`
+2. Natro'daki gerçek `config.php` dosyasına (cPanel Dosya Yöneticisi'nden) `google` bölümünü ekle — `client_id`/`client_secret` yereldekiyle aynı, `redirect_uri` sadece yukarıdaki canlı adres olacak.
+3. İki seçenek var:
+   - **(A - Önerilen, daha basit)** Yerel `google_oauth_tokens` tablosundaki tek satırı (`refresh_token_encrypted`, `access_token`, `access_token_expires_at`) phpMyAdmin üzerinden canlı veritabanına aynen kopyala. Aynı `app_secret` kullanıldığı sürece şifre çözme de çalışır — tekrar Google izin ekranından geçmene gerek kalmaz.
+   - **(B)** Canlı sitede `https://teslim.workonruf.com/api/oauth_authorize.php` adresine gidip Google izin ekranını bir daha tamamla (yerelde yaptığın gibi).
+4. `https://teslim.workonruf.com/api/backfill_drive_folders.php` adresine bir kere git — o ana kadar canlıda oluşturulmuş (varsa) klasörleri de Drive'a eşler. Güvenle tekrar çalıştırılabilir.
+
+Bundan sonra portalden yüklenen her dosya gerçekten Google Drive hesabına gidecek, indirirken tarayıcı hiçbir zaman drive.google.com görmeyecek.
+
 ---
 
-Bu adımları tamamladığında bana haber ver — Faz 2'ye (frontend'i bu API'ye bağlama) geçeriz.
+Bu adımları tamamladığında bana haber ver.
