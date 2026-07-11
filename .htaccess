@@ -1,0 +1,9 @@
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [QSA,L]
+
+# config.php ve schema.sql web'den asla dogrudan erisilebilir olmamali.
+<FilesMatch "^(config\.php|config\.example\.php|schema\.sql)$">
+    Require all denied
+</FilesMatch>
