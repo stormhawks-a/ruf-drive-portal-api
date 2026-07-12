@@ -63,12 +63,24 @@ final class GoogleDriveClient
     /** Streams a Drive file's bytes directly to the current HTTP response (never exposes the Drive URL). */
     public static function streamFile(string $fileId): void
     {
+        self::streamFileTo($fileId, function (string $chunk): void {
+            echo $chunk;
+        });
+    }
+
+    /**
+     * Streams a Drive file's bytes chunk-by-chunk through a callback instead of
+     * echoing directly — lets callers (e.g. the ZIP writer) both forward the bytes
+     * and track running size/CRC32 without ever buffering the whole file in memory.
+     */
+    public static function streamFileTo(string $fileId, callable $onChunk): void
+    {
         $ch = curl_init(self::API_BASE . '/files/' . urlencode($fileId) . '?alt=media');
         curl_setopt_array($ch, [
             CURLOPT_HTTPHEADER => ['Authorization: Bearer ' . GoogleOAuth::getAccessToken()],
             CURLOPT_RETURNTRANSFER => false,
-            CURLOPT_WRITEFUNCTION => function ($ch, $chunk) {
-                echo $chunk;
+            CURLOPT_WRITEFUNCTION => function ($ch, $chunk) use ($onChunk) {
+                $onChunk($chunk);
                 return strlen($chunk);
             },
         ]);

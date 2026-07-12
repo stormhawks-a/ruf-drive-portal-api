@@ -86,7 +86,14 @@ CREATE TABLE IF NOT EXISTS shared_links (
   download_count   INT UNSIGNED NOT NULL DEFAULT 0,
   created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   revoked_at       DATETIME     NULL,
-  CONSTRAINT fk_links_creator FOREIGN KEY (created_by_id) REFERENCES users(id)
+  -- view_mode: 'consumer' = basit WeTransfer tarzi indirme listesi (tek seviye,
+  -- onizlemesiz). 'customer' = musterinin kendi panelindeki gibi tam gezinme +
+  -- onizleme (salt-okunur). customer_user_id doluysa bu link belirli bir
+  -- musterinin "kalici" paylasim linkidir (Paylas butonundan üretilen/yenilenen).
+  view_mode        ENUM('consumer','customer') NOT NULL DEFAULT 'consumer',
+  customer_user_id VARCHAR(40)  NULL,
+  CONSTRAINT fk_links_creator FOREIGN KEY (created_by_id) REFERENCES users(id),
+  CONSTRAINT fk_links_customer FOREIGN KEY (customer_user_id) REFERENCES users(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS shared_link_files (
@@ -115,6 +122,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   user_name   VARCHAR(150) NOT NULL,
   user_role   VARCHAR(20) NOT NULL,
   action      ENUM('LOGIN','FILE_UPLOAD','FILE_DELETE','FILE_RENAME','FOLDER_CREATE','FOLDER_RENAME',
+                    'FOLDER_RESTORE','FILE_RESTORE',
                     'DRIVE_SYNC','LINK_CREATE','FILE_DOWNLOAD','BULK_DOWNLOAD','FILE_PREVIEW',
                     'PERMISSION_CHANGE','BACKGROUND_CHANGE') NOT NULL,
   details     TEXT NOT NULL,

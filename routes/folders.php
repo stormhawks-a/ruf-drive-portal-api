@@ -11,6 +11,26 @@ function folders_resolve_drive_parent(?string $parentId): ?string
     return $setting['value'] ?? null;
 }
 
+/** Every folder id in the subtree rooted at $rootId (itself included), regardless of trash state. */
+function folders_collect_descendant_ids(string $rootId): array
+{
+    $allIds = [$rootId];
+    $frontier = [$rootId];
+    $guard = 0;
+    while (!empty($frontier) && $guard < 200) {
+        $placeholders = implode(',', array_fill(0, count($frontier), '?'));
+        $children = Db::query("SELECT id FROM folders WHERE parent_id IN ($placeholders)", $frontier);
+        $childIds = array_values(array_diff(array_column($children, 'id'), $allIds));
+        if (empty($childIds)) {
+            break;
+        }
+        $allIds = array_merge($allIds, $childIds);
+        $frontier = $childIds;
+        $guard++;
+    }
+    return $allIds;
+}
+
 function folders_list(array $params): void
 {
     $user = Auth::requireAuth();
@@ -85,7 +105,10 @@ function folders_create(array $params): void
 
 function folders_update(array $params): void
 {
-    $user = Auth::requireAuth();
+    $user = Auth::currentUser() ?? shared_links_resolve_acting_user();
+    if ($user === null) {
+        Response::error('Oturum açmanız gerekiyor.', 401);
+    }
     $id = $params['id'];
     $folder = Db::queryOne('SELECT * FROM folders WHERE id = ?', [$id]);
     if ($folder === null) {
@@ -107,7 +130,10 @@ function folders_update(array $params): void
 
 function folders_delete(array $params): void
 {
-    $user = Auth::requireAuth();
+    $user = Auth::currentUser() ?? shared_links_resolve_acting_user();
+    if ($user === null) {
+        Response::error('Oturum açmanız gerekiyor.', 401);
+    }
     $id = $params['id'];
     $folder = Db::queryOne('SELECT * FROM folders WHERE id = ?', [$id]);
     if ($folder === null) {
@@ -115,16 +141,65 @@ function folders_delete(array $params): void
     }
     Scope::assertFolderAccessible($user, $id);
 
-    Db::execute('UPDATE folders SET deleted_at = NOW(), deleted_by = ? WHERE id = ?', [$user['id'], $id]);
+    // Cascade the same soft-delete to every descendant folder/file so the trash is
+    // consistent after a page reload — previously only this one row was marked
+    // deleted, so a refresh made nested items reappear active (but unreachable,
+    // since their parent was hidden) instead of showing up in the trash.
+    // Items already in the trash (deleted independently, earlier) are left alone.
+    $descendantIds = folders_collect_descendant_ids($id);
+    $now = date('Y-m-d H:i:s');
+    $placeholders = implode(',', array_fill(0, count($descendantIds), '?'));
+    Db::execute(
+        "UPDATE folders SET deleted_at = ?, deleted_by = ? WHERE id IN ($placeholders) AND deleted_at IS NULL",
+        array_merge([$now, $user['id']], $descendantIds)
+    );
+    Db::execute(
+        "UPDATE files SET deleted_at = ?, deleted_by = ? WHERE parent_id IN ($placeholders) AND deleted_at IS NULL",
+        array_merge([$now, $user['id']], $descendantIds)
+    );
     AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_DELETE', "Klasör çöp kutusuna taşındı: {$folder['name']}");
     Response::json(['ok' => true]);
 }
 
 function folders_restore(array $params): void
 {
-    $user = Auth::requireRole(['ADMIN', 'EDITOR']);
+    $user = Auth::currentUser() ?? shared_links_resolve_acting_user();
+    if ($user === null) {
+        Response::error('Oturum açmanız gerekiyor.', 401);
+    }
     $id = $params['id'];
+    Scope::assertFolderAccessible($user, $id);
+    $folder = Db::queryOne('SELECT * FROM folders WHERE id = ?', [$id]);
+    if ($folder === null) {
+        Response::error('Klasör bulunamadı.', 404);
+    }
+    $deletedAt = $folder['deleted_at'];
+
+    // Collect the full subtree — INCLUDING $id itself — before touching anything.
+    // Files sitting directly inside the folder being restored have parent_id === $id,
+    // so $id must stay in the id list used for the files cascade below; a previous
+    // version of this excluded $id from that list (to avoid a redundant no-op update
+    // on the folders side) which silently meant files directly in the restored folder
+    // itself were never restored, only files in deeper subfolders.
+    $allIds = folders_collect_descendant_ids($id);
+
     Db::execute('UPDATE folders SET deleted_at = NULL, deleted_by = NULL WHERE id = ?', [$id]);
+
+    if ($deletedAt !== null) {
+        // Only cascade-restore items that were trashed in the very same delete
+        // operation (same timestamp) — anything trashed independently, before or
+        // after, stays in the trash.
+        $placeholders = implode(',', array_fill(0, count($allIds), '?'));
+        Db::execute(
+            "UPDATE folders SET deleted_at = NULL, deleted_by = NULL WHERE id IN ($placeholders) AND deleted_at = ?",
+            array_merge($allIds, [$deletedAt])
+        );
+        Db::execute(
+            "UPDATE files SET deleted_at = NULL, deleted_by = NULL WHERE parent_id IN ($placeholders) AND deleted_at = ?",
+            array_merge($allIds, [$deletedAt])
+        );
+    }
+    AuditLogger::log($user['id'], $user['name'], $user['role'], 'FOLDER_RESTORE', "Klasör çöp kutusundan geri yüklendi.");
     Response::json(['ok' => true]);
 }
 

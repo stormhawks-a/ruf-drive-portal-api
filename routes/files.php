@@ -95,19 +95,29 @@ function files_create(array $params): void
 
 function files_download(array $params): void
 {
-    $user = Auth::requireAuth();
     $id = $params['id'];
     $file = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
     if ($file === null) {
         Response::error('Dosya bulunamadı.', 404);
     }
-    Scope::assertFolderAccessible($user, $file['parent_id']);
+
+    // Two ways in: a real logged-in account scoped to this file's folder, or an
+    // unlocked share-link session whose shared scope includes this file.
+    $user = Auth::currentUser();
+    if ($user !== null) {
+        Scope::assertFolderAccessible($user, $file['parent_id']);
+        AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_DOWNLOAD', "Dosya indirildi: {$file['name']}");
+    } else {
+        $shareLinkId = Auth::currentShareLinkId();
+        if ($shareLinkId === null || !shared_links_grants_file($shareLinkId, $file)) {
+            Response::error('Oturum açmanız gerekiyor.', 401);
+        }
+        Db::execute('UPDATE shared_links SET download_count = download_count + 1 WHERE id = ?', [$shareLinkId]);
+    }
 
     if ($file['drive_file_id'] === null) {
         Response::error('Bu dosya için depolanmış bir kopya yok.', 404);
     }
-
-    AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_DOWNLOAD', "Dosya indirildi: {$file['name']}");
 
     header('Content-Type: ' . ($file['mime_type'] ?: 'application/octet-stream'));
     header('Content-Disposition: attachment; filename="' . str_replace('"', '', $file['name']) . '"');
@@ -117,7 +127,10 @@ function files_download(array $params): void
 
 function files_update(array $params): void
 {
-    $user = Auth::requireAuth();
+    $user = Auth::currentUser() ?? shared_links_resolve_acting_user();
+    if ($user === null) {
+        Response::error('Oturum açmanız gerekiyor.', 401);
+    }
     $id = $params['id'];
     $file = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
     if ($file === null) {
@@ -139,7 +152,10 @@ function files_update(array $params): void
 
 function files_delete(array $params): void
 {
-    $user = Auth::requireAuth();
+    $user = Auth::currentUser() ?? shared_links_resolve_acting_user();
+    if ($user === null) {
+        Response::error('Oturum açmanız gerekiyor.', 401);
+    }
     $id = $params['id'];
     $file = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
     if ($file === null) {
@@ -154,9 +170,18 @@ function files_delete(array $params): void
 
 function files_restore(array $params): void
 {
-    Auth::requireRole(['ADMIN', 'EDITOR']);
+    $user = Auth::currentUser() ?? shared_links_resolve_acting_user();
+    if ($user === null) {
+        Response::error('Oturum açmanız gerekiyor.', 401);
+    }
     $id = $params['id'];
+    $file = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
+    if ($file === null) {
+        Response::error('Dosya bulunamadı.', 404);
+    }
+    Scope::assertFolderAccessible($user, $file['parent_id']);
     Db::execute('UPDATE files SET deleted_at = NULL, deleted_by = NULL WHERE id = ?', [$id]);
+    AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_RESTORE', "Dosya çöp kutusundan geri yüklendi: {$file['name']}");
     Response::json(['ok' => true]);
 }
 

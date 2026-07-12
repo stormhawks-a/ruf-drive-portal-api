@@ -16,6 +16,7 @@ require __DIR__ . '/lib/Scope.php';
 require __DIR__ . '/lib/Crypto.php';
 require __DIR__ . '/lib/GoogleOAuth.php';
 require __DIR__ . '/lib/GoogleDriveClient.php';
+require __DIR__ . '/lib/ZipStreamer.php';
 
 set_exception_handler(function (Throwable $e): void {
     error_log($e->getMessage() . "\n" . $e->getTraceAsString());

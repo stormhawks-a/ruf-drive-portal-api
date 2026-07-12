@@ -55,6 +55,21 @@ function users_create(array $params): void
         throw $e;
     }
 
+    // Best-effort Drive mirror for the customer's root folder — without this, this
+    // folder (and everything ever uploaded inside it) would never get a
+    // drive_folder_id, silently breaking Drive sync for the whole customer.
+    if ($folderId !== null) {
+        try {
+            $driveParentId = folders_resolve_drive_parent(null);
+            if ($driveParentId !== null) {
+                $driveFolderId = GoogleDriveClient::createFolder($name, $driveParentId);
+                Db::execute('UPDATE folders SET drive_folder_id = ? WHERE id = ?', [$driveFolderId, $folderId]);
+            }
+        } catch (Throwable $e) {
+            error_log('Drive klasor aynalama basarisiz (musteri kok klasoru): ' . $e->getMessage());
+        }
+    }
+
     AuditLogger::log($actor['id'], $actor['name'], $actor['role'], 'PERMISSION_CHANGE', "Yeni kullanıcı oluşturuldu: {$name} ({$role})");
 
     $response = ['id' => $userId, 'name' => $name, 'role' => $role, 'folderId' => $folderId];
@@ -120,6 +135,35 @@ function users_delete(array $params): void
     if ($target === null) {
         Response::error('Kullanıcı bulunamadı.', 404);
     }
+
+    // A plain DELETE FROM users used to fail with an uncaught FK violation (surfaced
+    // to the client as a generic "Sunucu hatası") the moment this user had ANY shared
+    // link or uploaded file pointing at them — which, for a customer with real usage
+    // history, is always. Clean up everything that references this user first.
+
+    // shared_links.customer_user_id / created_by_id both have NO ACTION delete rules.
+    Db::execute('DELETE FROM shared_links WHERE customer_user_id = ? OR created_by_id = ?', [$id, $id]);
+
+    // A customer's root folder cascades (via FK ON DELETE CASCADE) to every descendant
+    // folder and every file inside them, so this alone clears files.owner_id too —
+    // no need to walk the tree by hand.
+    if ($target['folder_id'] !== null) {
+        // Best-effort: the customer's Drive folder may already be gone (e.g. deleted
+        // by hand from Drive directly), so a 404 here must not block the DB cleanup.
+        $folder = Db::queryOne('SELECT drive_folder_id FROM folders WHERE id = ?', [$target['folder_id']]);
+        if ($folder !== null && $folder['drive_folder_id'] !== null) {
+            try {
+                GoogleDriveClient::deleteFile($folder['drive_folder_id']);
+            } catch (Throwable $e) {
+                error_log('Drive klasörü silinemedi (müşteri silme): ' . $e->getMessage());
+            }
+        }
+        Db::execute('DELETE FROM folders WHERE id = ?', [$target['folder_id']]);
+    }
+
+    // Safety net for any files owned by this user outside their own folder tree
+    // (shouldn't normally happen, but the FK would otherwise still block deletion).
+    Db::execute('DELETE FROM files WHERE owner_id = ?', [$id]);
 
     Db::execute('DELETE FROM users WHERE id = ?', [$id]);
     AuditLogger::log($actor['id'], $actor['name'], $actor['role'], 'PERMISSION_CHANGE', "Kullanıcı silindi: {$target['name']}");
