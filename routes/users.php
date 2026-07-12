@@ -144,9 +144,6 @@ function users_delete(array $params): void
     // shared_links.customer_user_id / created_by_id both have NO ACTION delete rules.
     Db::execute('DELETE FROM shared_links WHERE customer_user_id = ? OR created_by_id = ?', [$id, $id]);
 
-    // A customer's root folder cascades (via FK ON DELETE CASCADE) to every descendant
-    // folder and every file inside them, so this alone clears files.owner_id too —
-    // no need to walk the tree by hand.
     if ($target['folder_id'] !== null) {
         // Best-effort: the customer's Drive folder may already be gone (e.g. deleted
         // by hand from Drive directly), so a 404 here must not block the DB cleanup.
@@ -158,7 +155,25 @@ function users_delete(array $params): void
                 error_log('Drive klasörü silinemedi (müşteri silme): ' . $e->getMessage());
             }
         }
-        Db::execute('DELETE FROM folders WHERE id = ?', [$target['folder_id']]);
+        // A plain `DELETE FROM folders WHERE id = ?` relies on the self-referential
+        // parent_id FK's ON DELETE CASCADE to reach every descendant — which, once the
+        // tree has even modest depth/branching, hits InnoDB's internal cascade
+        // recursion limit ("Foreign key cascade delete/update exceeds max tables limit
+        // of 30", MySQL error 6575) and fails with a 500. MySQL evaluates the cascade
+        // per matched row regardless of whether the children are also in the same
+        // DELETE's id list, so even a single multi-id statement still recurses. We've
+        // already collected and are deleting the complete, self-contained set (every
+        // descendant folder plus every file inside them), so it's safe to disable FK
+        // checks for just these two statements instead of fighting the recursion limit.
+        $allFolderIds = folders_collect_descendant_ids($target['folder_id']);
+        $placeholders = implode(',', array_fill(0, count($allFolderIds), '?'));
+        Db::execute('SET FOREIGN_KEY_CHECKS=0');
+        try {
+            Db::execute("DELETE FROM files WHERE parent_id IN ($placeholders)", $allFolderIds);
+            Db::execute("DELETE FROM folders WHERE id IN ($placeholders)", $allFolderIds);
+        } finally {
+            Db::execute('SET FOREIGN_KEY_CHECKS=1');
+        }
     }
 
     // Safety net for any files owned by this user outside their own folder tree

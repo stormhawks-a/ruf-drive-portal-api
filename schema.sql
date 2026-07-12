@@ -82,6 +82,10 @@ CREATE TABLE IF NOT EXISTS shared_links (
   created_by_id    VARCHAR(40)  NOT NULL,
   recipient_name   VARCHAR(255) NULL,
   password_hash    VARCHAR(255) NULL,
+  -- Reversible (AES-256-GCM via Crypto) copy of the same password, stored purely so
+  -- staff can see "the last password we assigned" in the share UI. password_hash
+  -- remains the source of truth for verification; this is a display-only convenience.
+  password_encrypted TEXT NULL,
   expires_at       DATETIME     NULL,
   download_count   INT UNSIGNED NOT NULL DEFAULT 0,
   created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,

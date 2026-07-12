@@ -39,12 +39,17 @@ function shared_links_resolve_acting_user(): ?array
     return Db::queryOne('SELECT * FROM users WHERE id = ?', [$link['customer_user_id']]);
 }
 
-/** Metadata only — direct file/folder ids, never the password hash. */
-function shared_links_serialize(array $link, bool $unlocked): array
+/**
+ * Metadata only — direct file/folder ids, never the password hash. `$includePassword`
+ * additionally decrypts and includes the current plaintext password (via
+ * `password_encrypted`) — only ever pass true from staff-only endpoints, never
+ * anything reachable by an anonymous share-link visitor.
+ */
+function shared_links_serialize(array $link, bool $unlocked, bool $includePassword = false): array
 {
     $fileIds = array_column(Db::query('SELECT file_id FROM shared_link_files WHERE shared_link_id = ?', [$link['id']]), 'file_id');
     $folderIds = array_column(Db::query('SELECT folder_id FROM shared_link_folders WHERE shared_link_id = ?', [$link['id']]), 'folder_id');
-    return [
+    $result = [
         'id' => $link['id'],
         'name' => $link['name'],
         'recipientName' => $link['recipient_name'],
@@ -58,6 +63,10 @@ function shared_links_serialize(array $link, bool $unlocked): array
         'fileIds' => array_values($fileIds),
         'folderIds' => array_values($folderIds),
     ];
+    if ($includePassword) {
+        $result['currentPassword'] = $link['password_encrypted'] !== null ? Crypto::decrypt($link['password_encrypted']) : null;
+    }
+    return $result;
 }
 
 /**
@@ -204,8 +213,13 @@ function shared_links_create(array $params): void
 
     $id = Ids::generate('link');
     Db::execute(
-        'INSERT INTO shared_links (id, name, created_by_id, recipient_name, password_hash, expires_at, view_mode, customer_user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [$id, $name, $user['id'], $recipientName, $password !== null ? Auth::hash($password) : null, $expiresAt, $viewMode, $customerId]
+        'INSERT INTO shared_links (id, name, created_by_id, recipient_name, password_hash, password_encrypted, expires_at, view_mode, customer_user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [
+            $id, $name, $user['id'], $recipientName,
+            $password !== null ? Auth::hash($password) : null,
+            $password !== null ? Crypto::encrypt($password) : null,
+            $expiresAt, $viewMode, $customerId,
+        ]
     );
     foreach ($fileIds as $fid) {
         Db::execute('INSERT IGNORE INTO shared_link_files (shared_link_id, file_id) VALUES (?, ?)', [$id, $fid]);
@@ -234,7 +248,50 @@ function shared_links_get_by_customer(array $params): void
         Response::json(['link' => null]);
         return;
     }
-    Response::json(['link' => shared_links_serialize($rows[0], true)]);
+    Response::json(['link' => shared_links_serialize($rows[0], true, true)]);
+}
+
+/** Staff-only: set or remove a persistent link's password in place, keeping the same id/URL. */
+function shared_links_update_password(array $params): void
+{
+    $user = Auth::requireRole(['ADMIN', 'EDITOR']);
+    $id = $params['id'];
+    $link = Db::queryOne('SELECT * FROM shared_links WHERE id = ?', [$id]);
+    if ($link === null) {
+        Response::error('Paylaşım bağlantısı bulunamadı.', 404);
+    }
+
+    $body = Response::body();
+    $password = trim((string) ($body['password'] ?? '')) ?: null;
+    $hash = $password !== null ? Auth::hash($password) : null;
+    $encrypted = $password !== null ? Crypto::encrypt($password) : null;
+    Db::execute('UPDATE shared_links SET password_hash = ?, password_encrypted = ? WHERE id = ?', [$hash, $encrypted, $id]);
+
+    $action = $password !== null ? 'şifresi güncellendi' : 'şifresi kaldırıldı';
+    AuditLogger::log($user['id'], $user['name'], $user['role'], 'LINK_CREATE', "Paylaşım bağlantısı {$action}: {$link['name']}");
+
+    $updated = Db::queryOne('SELECT * FROM shared_links WHERE id = ?', [$id]);
+    Response::json(['link' => shared_links_serialize($updated, true, true)]);
+}
+
+/** Staff-only: hasPassword flag for every customer's latest active persistent link, in one query — powers a lock badge on the customer card grid without an N+1 fetch per card. */
+function shared_links_status_all(array $params): void
+{
+    Auth::requireRole(['ADMIN', 'EDITOR']);
+    $rows = Db::query(
+        "SELECT customer_user_id, password_hash FROM shared_links
+         WHERE customer_user_id IS NOT NULL AND revoked_at IS NULL
+         AND (expires_at IS NULL OR expires_at > NOW())
+         ORDER BY created_at DESC"
+    );
+    $statuses = [];
+    foreach ($rows as $row) {
+        $cid = $row['customer_user_id'];
+        if (!array_key_exists($cid, $statuses)) {
+            $statuses[$cid] = $row['password_hash'] !== null;
+        }
+    }
+    Response::json(['statuses' => $statuses]);
 }
 
 function shared_links_revoke(array $params): void
@@ -305,7 +362,9 @@ function shared_links_unlock(array $params): void
 return [
     ['POST', '#^/shared-links$#', 'shared_links_create'],
     ['GET', '#^/shared-links/by-customer/(?P<customerId>[a-zA-Z0-9_]+)$#', 'shared_links_get_by_customer'],
+    ['GET', '#^/shared-links/status-by-customers$#', 'shared_links_status_all'],
     ['GET', '#^/shared-links/(?P<id>[a-zA-Z0-9_]+)$#', 'shared_links_get'],
     ['POST', '#^/shared-links/(?P<id>[a-zA-Z0-9_]+)/unlock$#', 'shared_links_unlock'],
     ['POST', '#^/shared-links/(?P<id>[a-zA-Z0-9_]+)/revoke$#', 'shared_links_revoke'],
+    ['POST', '#^/shared-links/(?P<id>[a-zA-Z0-9_]+)/password$#', 'shared_links_update_password'],
 ];
