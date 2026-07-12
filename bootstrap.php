@@ -2,6 +2,12 @@
 
 declare(strict_types=1);
 
+// PHP defaults to UTC with nothing set here, while MySQL's CURRENT_TIMESTAMP/NOW()
+// follow the server's local timezone — any PHP-side date()/time() call would
+// otherwise silently disagree with timestamps MySQL generates itself (see the
+// deleted_at fix in routes/folders.php for a concrete case this caused).
+date_default_timezone_set('Europe/Istanbul');
+
 error_reporting(E_ALL);
 ini_set('display_errors', '0'); // prod: hatalar loga yazilir, tarayiciya asla basilmaz
 ini_set('log_errors', '1');

@@ -97,6 +97,40 @@ final class GoogleDriveClient
         self::request('DELETE', self::API_BASE . '/files/' . urlencode($fileId));
     }
 
+    /**
+     * Streams Drive's own pre-generated thumbnail (a small JPEG, regardless of the
+     * original format) instead of the full original file — used for in-app previews
+     * of jpg/png so large photos load fast; the real download endpoint still streams
+     * the original via streamFile(). Returns false if Drive has no thumbnail yet
+     * (e.g. a file uploaded moments ago), so the caller can fall back to the original.
+     */
+    public static function streamThumbnail(string $fileId, int $size = 480): bool
+    {
+        $meta = self::request('GET', self::API_BASE . '/files/' . urlencode($fileId) . '?fields=thumbnailLink');
+        $thumbnailUrl = $meta['thumbnailLink'] ?? null;
+        if ($thumbnailUrl === null) {
+            return false;
+        }
+        // thumbnailLink comes back sized like "...=s220"; request the size we actually need.
+        $thumbnailUrl = preg_replace('/=s\d+$/', '=s' . $size, $thumbnailUrl, 1) ?? $thumbnailUrl;
+
+        $ch = curl_init($thumbnailUrl);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 10,
+        ]);
+        $body = curl_exec($ch);
+        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        if ($status >= 400 || $body === false) {
+            return false;
+        }
+
+        header('Content-Type: image/jpeg');
+        header('Cache-Control: private, max-age=86400');
+        echo $body;
+        return true;
+    }
+
     private static function request(string $method, string $url, ?array $jsonBody = null): array
     {
         $ch = curl_init($url);

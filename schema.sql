@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS users (
   email         VARCHAR(190) NULL,
   username      VARCHAR(100) NULL,
   password_hash VARCHAR(255) NOT NULL,
+  -- Reversible (AES-256-GCM via Crypto) copy of the same password, purely so an
+  -- admin can look up "what did we set this person's password to" from the edit
+  -- form — password_hash remains the source of truth for actually logging in.
+  password_encrypted TEXT NULL,
   role          ENUM('ADMIN','EDITOR','CUSTOMER') NOT NULL,
   avatar_url    VARCHAR(500) NULL,
   folder_id     VARCHAR(40)  NULL,

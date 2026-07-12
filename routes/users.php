@@ -7,6 +7,20 @@ function users_list(array $params): void
     Response::json(['users' => $rows]);
 }
 
+/** Admin-only, single-user, on-demand — deliberately not bundled into users_list
+    so every personnel record's password isn't sitting in one bulk response. */
+function users_get_password(array $params): void
+{
+    Auth::requireRole('ADMIN');
+    $id = $params['id'];
+    $target = Db::queryOne('SELECT password_encrypted FROM users WHERE id = ?', [$id]);
+    if ($target === null) {
+        Response::error('Kullanıcı bulunamadı.', 404);
+    }
+    $password = $target['password_encrypted'] !== null ? Crypto::decrypt($target['password_encrypted']) : null;
+    Response::json(['password' => $password]);
+}
+
 function users_create(array $params): void
 {
     $actor = Auth::requireRole('ADMIN');
@@ -43,8 +57,8 @@ function users_create(array $params): void
         }
 
         Db::execute(
-            'INSERT INTO users (id, name, email, username, password_hash, role, folder_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [$userId, $name, $email, $username, Auth::hash($plainPassword), $role, $folderId]
+            'INSERT INTO users (id, name, email, username, password_hash, password_encrypted, role, folder_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [$userId, $name, $email, $username, Auth::hash($plainPassword), Crypto::encrypt($plainPassword), $role, $folderId]
         );
         $db->commit();
     } catch (Throwable $e) {
@@ -110,6 +124,8 @@ function users_update(array $params): void
     if (!empty($body['password'])) {
         $fields[] = 'password_hash = ?';
         $values[] = Auth::hash((string) $body['password']);
+        $fields[] = 'password_encrypted = ?';
+        $values[] = Crypto::encrypt((string) $body['password']);
     }
 
     if (empty($fields)) {
@@ -190,4 +206,5 @@ return [
     ['POST', '#^/users$#', 'users_create'],
     ['PUT', '#^/users/(?P<id>[a-zA-Z0-9_]+)$#', 'users_update'],
     ['DELETE', '#^/users/(?P<id>[a-zA-Z0-9_]+)$#', 'users_delete'],
+    ['GET', '#^/users/(?P<id>[a-zA-Z0-9_]+)/password$#', 'users_get_password'],
 ];

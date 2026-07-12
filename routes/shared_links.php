@@ -235,14 +235,21 @@ function shared_links_create(array $params): void
 }
 
 /** Latest active (non-revoked, non-expired) persistent link for a given customer, if any. */
+/**
+ * "Müşteri" (full panel) and "Tüketici" (download-only) persistent links are
+ * independent slots per customer, not one shared "the current link" — a
+ * request must say which one it wants, so renewing/updating one mode never
+ * touches the other's still-valid link.
+ */
 function shared_links_get_by_customer(array $params): void
 {
     Auth::requireRole(['ADMIN', 'EDITOR']);
     $customerId = $params['customerId'];
+    $viewMode = ($_GET['viewMode'] ?? 'customer') === 'consumer' ? 'consumer' : 'customer';
     $rows = Db::query(
-        "SELECT * FROM shared_links WHERE customer_user_id = ? AND revoked_at IS NULL
+        "SELECT * FROM shared_links WHERE customer_user_id = ? AND view_mode = ? AND revoked_at IS NULL
          AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY created_at DESC LIMIT 1",
-        [$customerId]
+        [$customerId, $viewMode]
     );
     if (empty($rows)) {
         Response::json(['link' => null]);

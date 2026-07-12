@@ -147,15 +147,20 @@ function folders_delete(array $params): void
     // since their parent was hidden) instead of showing up in the trash.
     // Items already in the trash (deleted independently, earlier) are left alone.
     $descendantIds = folders_collect_descendant_ids($id);
-    $now = date('Y-m-d H:i:s');
+    // NOW() (MySQL's own clock), not PHP's date() — PHP defaults to UTC with no
+    // timezone configured anywhere in this app, while MySQL's CURRENT_TIMESTAMP
+    // (used for created_at etc.) follows the server's local timezone. Mixing the
+    // two produced a deleted_at that could read as *before* created_at by exactly
+    // the UTC offset (3 hours on this server) — cosmetic on its own, but the kind
+    // of clock mismatch that can quietly break anything comparing timestamps.
     $placeholders = implode(',', array_fill(0, count($descendantIds), '?'));
     Db::execute(
-        "UPDATE folders SET deleted_at = ?, deleted_by = ? WHERE id IN ($placeholders) AND deleted_at IS NULL",
-        array_merge([$now, $user['id']], $descendantIds)
+        "UPDATE folders SET deleted_at = NOW(), deleted_by = ? WHERE id IN ($placeholders) AND deleted_at IS NULL",
+        array_merge([$user['id']], $descendantIds)
     );
     Db::execute(
-        "UPDATE files SET deleted_at = ?, deleted_by = ? WHERE parent_id IN ($placeholders) AND deleted_at IS NULL",
-        array_merge([$now, $user['id']], $descendantIds)
+        "UPDATE files SET deleted_at = NOW(), deleted_by = ? WHERE parent_id IN ($placeholders) AND deleted_at IS NULL",
+        array_merge([$user['id']], $descendantIds)
     );
     AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_DELETE', "Klasör çöp kutusuna taşındı: {$folder['name']}");
     Response::json(['ok' => true]);

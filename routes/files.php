@@ -125,6 +125,38 @@ function files_download(array $params): void
     exit;
 }
 
+/** Same access rules as files_download, but serves a small pre-generated Drive
+    thumbnail instead of the original bytes — only ever used for jpg/png previews,
+    so large source photos don't have to be fully downloaded just to browse them. */
+function files_thumbnail(array $params): void
+{
+    $id = $params['id'];
+    $file = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
+    if ($file === null) {
+        Response::error('Dosya bulunamadı.', 404);
+    }
+
+    $user = Auth::currentUser();
+    if ($user !== null) {
+        Scope::assertFolderAccessible($user, $file['parent_id']);
+    } else {
+        $shareLinkId = Auth::currentShareLinkId();
+        if ($shareLinkId === null || !shared_links_grants_file($shareLinkId, $file)) {
+            Response::error('Oturum açmanız gerekiyor.', 401);
+        }
+    }
+
+    if ($file['drive_file_id'] === null || !in_array($file['mime_type'], ['image/jpeg', 'image/png'], true)) {
+        Response::error('Küçük resim mevcut değil.', 404);
+    }
+
+    $size = isset($_GET['size']) ? max(64, min(2048, (int) $_GET['size'])) : 480;
+    if (!GoogleDriveClient::streamThumbnail($file['drive_file_id'], $size)) {
+        Response::error('Küçük resim alınamadı.', 404);
+    }
+    exit;
+}
+
 function files_update(array $params): void
 {
     $user = Auth::currentUser() ?? shared_links_resolve_acting_user();
@@ -189,6 +221,7 @@ return [
     ['GET', '#^/files$#', 'files_list'],
     ['POST', '#^/files$#', 'files_create'],
     ['GET', '#^/files/(?P<id>[a-zA-Z0-9_]+)/download$#', 'files_download'],
+    ['GET', '#^/files/(?P<id>[a-zA-Z0-9_]+)/thumbnail$#', 'files_thumbnail'],
     ['PUT', '#^/files/(?P<id>[a-zA-Z0-9_]+)$#', 'files_update'],
     ['DELETE', '#^/files/(?P<id>[a-zA-Z0-9_]+)$#', 'files_delete'],
     ['POST', '#^/files/(?P<id>[a-zA-Z0-9_]+)/restore$#', 'files_restore'],
