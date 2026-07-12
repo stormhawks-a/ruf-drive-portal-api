@@ -132,8 +132,11 @@ function zip_download(array $params): void
         Response::error('İndirilebilir gerçek dosya bulunamadı.', 404);
     }
 
+    // ZipStreamer writes zip64 unconditionally, so the old 4GB-per-field format
+    // limit no longer applies — this is now purely an abuse/sanity ceiling, not a
+    // technical one.
     $totalSize = array_sum(array_column($entries, 'size'));
-    $maxZipBytes = 3 * 1024 * 1024 * 1024; // headroom under the 32-bit zip format's 4GB limit + shared-hosting time limits
+    $maxZipBytes = 200 * 1024 * 1024 * 1024;
     if ($totalSize > $maxZipBytes) {
         Response::error(
             'Seçilen dosyalar tek bir ZIP için çok büyük (' . round($totalSize / 1073741824, 2) . ' GB). Lütfen dosyaları daha küçük gruplar halinde seçip tekrar deneyin.',
@@ -145,8 +148,17 @@ function zip_download(array $params): void
         AuditLogger::log($user['id'], $user['name'], $user['role'], 'BULK_DOWNLOAD', count($entries) . ' dosya ZIP olarak indirildi.');
     }
 
+    $requestedName = trim((string) ($_GET['name'] ?? ''));
+    // Strip path separators / control characters — this becomes an HTTP header and
+    // a filesystem name on the customer's machine.
+    $safeName = preg_replace('/[\/\\\\:*?"<>|\x00-\x1f]/', '', $requestedName);
+    $downloadName = $safeName !== '' ? $safeName : 'RUF_Drive_Secilmisler';
+    if (!preg_match('/\.zip$/i', $downloadName)) {
+        $downloadName .= '.zip';
+    }
+
     @set_time_limit(0);
-    ZipStreamer::stream($entries, 'RUF_Drive_Secilmisler.zip');
+    ZipStreamer::stream($entries, $downloadName);
     exit;
 }
 
