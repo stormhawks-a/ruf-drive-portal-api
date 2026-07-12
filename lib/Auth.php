@@ -4,6 +4,26 @@ final class Auth
 {
     private static bool $started = false;
 
+    // Real accounts (ADMIN/EDITOR/CUSTOMER) use a native PHP session under this
+    // cookie. Anonymous share-link visits used to share that SAME session/cookie,
+    // and opening a customer's share link in a new tab called session_regenerate_id()
+    // on it (cookies are shared browser-wide, not per-tab) — wiping the admin's own
+    // login in every other tab of that browser. Share-link identity is now a
+    // separate, self-contained encrypted cookie instead of a second PHP session:
+    // PHP only reliably supports one active session per request (a second
+    // session_name()/session_start() call silently no-ops and reuses the first
+    // session's id, which was the actual bug here), so it can't just be "another
+    // session store" — it has to not go through the session mechanism at all.
+    private const AUTH_COOKIE = 'ruf_session';
+    private const SHARE_COOKIE = 'ruf_share_session';
+
+    // Neither staff/customer logins nor share links should time out during normal,
+    // possibly hours-long use (e.g. a large file transfer) — only real logout ends
+    // them. 24h is generous slack on top of that, not a "stay logged in forever" cookie.
+    private const SESSION_LIFETIME_SECONDS = 60 * 60 * 24;
+
+    private static ?string $shareLinkId = null;
+
     public static function startSession(): void
     {
         if (self::$started) {
@@ -12,16 +32,25 @@ final class Auth
         self::$started = true;
 
         $secure = (bool) Config::get('secure_cookies');
+        ini_set('session.gc_maxlifetime', (string) self::SESSION_LIFETIME_SECONDS);
         session_set_cookie_params([
-            'lifetime' => 0,
+            'lifetime' => 0, // still a browser-session cookie — closing the browser ends it
             'path' => '/',
             'domain' => '',
             'secure' => $secure,
             'httponly' => true,
             'samesite' => 'Lax',
         ]);
-        session_name((string) (Config::get('session_name') ?: 'ruf_session'));
+        session_name(self::AUTH_COOKIE);
         session_start();
+
+        if (isset($_COOKIE[self::SHARE_COOKIE])) {
+            try {
+                self::$shareLinkId = Crypto::decrypt($_COOKIE[self::SHARE_COOKIE]);
+            } catch (Throwable $e) {
+                self::$shareLinkId = null;
+            }
+        }
     }
 
     public static function login(array $userRow): void
@@ -29,14 +58,19 @@ final class Auth
         session_regenerate_id(true);
         $_SESSION['user_id'] = $userRow['id'];
         $_SESSION['role'] = $userRow['role'];
-        unset($_SESSION['share_link_id']);
     }
 
     public static function loginShareLink(string $sharedLinkId): void
     {
-        session_regenerate_id(true);
-        $_SESSION['share_link_id'] = $sharedLinkId;
-        unset($_SESSION['user_id'], $_SESSION['role']);
+        self::$shareLinkId = $sharedLinkId;
+        setcookie(self::SHARE_COOKIE, Crypto::encrypt($sharedLinkId), [
+            'expires' => 0,
+            'path' => '/',
+            'domain' => '',
+            'secure' => (bool) Config::get('secure_cookies'),
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ]);
     }
 
     public static function logout(): void
@@ -67,7 +101,7 @@ final class Auth
 
     public static function currentShareLinkId(): ?string
     {
-        return $_SESSION['share_link_id'] ?? null;
+        return self::$shareLinkId;
     }
 
     public static function requireAuth(): array
