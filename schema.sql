@@ -149,7 +149,9 @@ CREATE TABLE IF NOT EXISTS background_settings (
   name            VARCHAR(255) NOT NULL,
   type            ENUM('image','video','slider','collage') NOT NULL,
   drive_file_id_1 VARCHAR(120) NULL,
+  media1_mime_type VARCHAR(100) NULL,
   drive_file_id_2 VARCHAR(120) NULL,
+  media2_mime_type VARCHAR(100) NULL,
   slider_position TINYINT UNSIGNED NULL,
   title           VARCHAR(255) NULL,
   subtitle        VARCHAR(255) NULL,
@@ -165,6 +167,7 @@ CREATE TABLE IF NOT EXISTS background_collage_images (
   id                     BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   background_settings_id VARCHAR(40) NOT NULL,
   drive_file_id          VARCHAR(120) NOT NULL,
+  mime_type              VARCHAR(100) NULL,
   sort_order             TINYINT UNSIGNED NOT NULL DEFAULT 0,
   CONSTRAINT fk_collage_bg FOREIGN KEY (background_settings_id) REFERENCES background_settings(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -183,8 +183,12 @@ function background_settings_delete(array $params): void
 }
 
 /** Shared upload handler for both the url1/url2 slots and a new collage photo — reads
-    the uploaded file, pushes it to Drive under the dedicated backgrounds folder. */
-function background_settings_store_upload(): string
+    the uploaded file, pushes it to Drive under the dedicated backgrounds folder.
+    Returns both the new Drive file id and its mime type — the latter has to be stored
+    too, since background_settings_stream_media/_collage need it to send a correct
+    Content-Type header (without one, browsers refuse to play <video>, unlike <img>
+    which sniffs the bytes and mostly gets away without it). */
+function background_settings_store_upload(): array
 {
     // Videos in particular can take a while to reach Drive over this server's own
     // connection — don't let PHP's default ~30s execution limit kill it mid-upload.
@@ -202,7 +206,8 @@ function background_settings_store_upload(): string
         Response::error('Drive bağlantısı kurulamadı, tekrar deneyin.', 502);
     }
 
-    return GoogleDriveClient::uploadFile($uploaded['name'], $driveParentId, $mimeType, $contents);
+    $driveFileId = GoogleDriveClient::uploadFile($uploaded['name'], $driveParentId, $mimeType, $contents);
+    return ['driveFileId' => $driveFileId, 'mimeType' => $mimeType];
 }
 
 function background_settings_upload_media(array $params): void
@@ -218,11 +223,13 @@ function background_settings_upload_media(array $params): void
         Response::error('Arkaplan bulunamadı.', 404);
     }
 
-    $driveFileId = background_settings_store_upload();
+    $upload = background_settings_store_upload();
+    $driveFileId = $upload['driveFileId'];
 
     $column = $slot === '1' ? 'drive_file_id_1' : 'drive_file_id_2';
+    $mimeColumn = $slot === '1' ? 'media1_mime_type' : 'media2_mime_type';
     $oldDriveFileId = $row[$column];
-    Db::execute("UPDATE background_settings SET {$column} = ? WHERE id = ?", [$driveFileId, $id]);
+    Db::execute("UPDATE background_settings SET {$column} = ?, {$mimeColumn} = ? WHERE id = ?", [$driveFileId, $upload['mimeType'], $id]);
     if ($oldDriveFileId !== null) {
         try {
             GoogleDriveClient::deleteFile($oldDriveFileId);
@@ -249,13 +256,13 @@ function background_settings_add_collage(array $params): void
         Response::error('En fazla 10 fotoğraf eklenebilir.', 422);
     }
 
-    $driveFileId = background_settings_store_upload();
+    $upload = background_settings_store_upload();
     $maxSort = Db::queryOne('SELECT MAX(sort_order) as m FROM background_collage_images WHERE background_settings_id = ?', [$id]);
     $sortOrder = ((int) ($maxSort['m'] ?? -1)) + 1;
 
     Db::execute(
-        'INSERT INTO background_collage_images (background_settings_id, drive_file_id, sort_order) VALUES (?, ?, ?)',
-        [$id, $driveFileId, $sortOrder]
+        'INSERT INTO background_collage_images (background_settings_id, drive_file_id, mime_type, sort_order) VALUES (?, ?, ?, ?)',
+        [$id, $upload['driveFileId'], $upload['mimeType'], $sortOrder]
     );
 
     $updated = Db::queryOne('SELECT * FROM background_settings WHERE id = ?', [$id]);
@@ -290,10 +297,12 @@ function background_settings_stream_media(array $params): void
         Response::error('Arkaplan bulunamadı.', 404);
     }
     $driveFileId = $slot === '1' ? $row['drive_file_id_1'] : $row['drive_file_id_2'];
+    $mimeType = $slot === '1' ? $row['media1_mime_type'] : $row['media2_mime_type'];
     if ($driveFileId === null) {
         Response::error('Medya bulunamadı.', 404);
     }
 
+    header('Content-Type: ' . ($mimeType ?: 'application/octet-stream'));
     header('Cache-Control: private, max-age=3600');
     GoogleDriveClient::streamFile($driveFileId);
     exit;
@@ -308,6 +317,7 @@ function background_settings_stream_collage(array $params): void
         Response::error('Fotoğraf bulunamadı.', 404);
     }
 
+    header('Content-Type: ' . ($row['mime_type'] ?: 'application/octet-stream'));
     header('Cache-Control: private, max-age=3600');
     GoogleDriveClient::streamFile($row['drive_file_id']);
     exit;
