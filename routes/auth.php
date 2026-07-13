@@ -22,7 +22,9 @@ function auth_login(array $params): void
     Auth::login($user);
     AuditLogger::log($user['id'], $user['name'], $user['role'], 'LOGIN', 'Giriş yapıldı.');
 
-    unset($user['password_hash']);
+    // SELECT * pulls password_hash AND the newer password_encrypted column — both
+    // are sensitive and neither belongs in a response body, even the user's own.
+    unset($user['password_hash'], $user['password_encrypted']);
     Response::json(['user' => $user]);
 }
 

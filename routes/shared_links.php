@@ -138,6 +138,14 @@ function shared_links_grants_file(string $shareLinkId, array $file): bool
     if ($link['expires_at'] !== null && strtotime($link['expires_at']) < time()) {
         return false;
     }
+    // "Musteri" (full-panel) links deliberately mirror the customer's own trash too
+    // (see shared_links_collect_content) — but a "Tuketici" (download-only) link must
+    // lose access to a file the instant it's trashed, even if the visitor already
+    // knows its id from before the delete. Without this, files_download/files_thumbnail
+    // would keep serving it for as long as the file sits in the 30-day trash window.
+    if ($file['deleted_at'] !== null && $link['view_mode'] !== 'customer') {
+        return false;
+    }
 
     $direct = Db::queryOne('SELECT 1 FROM shared_link_files WHERE shared_link_id = ? AND file_id = ?', [$shareLinkId, $file['id']]);
     if ($direct !== null) {
@@ -352,7 +360,10 @@ function shared_links_unlock(array $params): void
 
     $body = Response::body();
     $password = (string) ($body['password'] ?? '');
-    if ($link['password_hash'] === null || !Auth::verify($password, $link['password_hash'])) {
+    // A password-less link has nothing to check here (the frontend never calls this
+    // endpoint for one — shared_links_get() unlocks it directly — but a stray direct
+    // call must not be unconditionally rejected just because there's no password set).
+    if ($link['password_hash'] !== null && !Auth::verify($password, $link['password_hash'])) {
         Response::error('Şifre yanlış.', 401);
     }
 
