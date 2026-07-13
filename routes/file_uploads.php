@@ -43,7 +43,9 @@ function file_uploads_start(array $params): void
 
 function file_uploads_chunk(array $params): void
 {
-    @set_time_limit(180);
+    // Must allow at least as long as GoogleDriveClient::uploadChunk's own 1800s
+    // curl timeout — otherwise PHP would kill the request first regardless.
+    @set_time_limit(1800);
     $user = Auth::requireAuth();
     $id = $params['id'];
     $upload = Db::queryOne('SELECT * FROM file_uploads WHERE id = ?', [$id]);

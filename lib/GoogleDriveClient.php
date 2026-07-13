@@ -113,7 +113,11 @@ final class GoogleDriveClient
             CURLOPT_POSTFIELDS => $chunkData,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_HEADER => true,
-            CURLOPT_TIMEOUT => 180,
+            // A slow outbound leg from shared hosting to Drive can legitimately take
+            // longer than a short timeout to push one whole chunk through — 180s was
+            // cutting real-but-slow transfers off mid-flight, which then had to be
+            // retried from scratch and looked like the upload was crawling overall.
+            CURLOPT_TIMEOUT => 1800,
             CURLOPT_HTTPHEADER => [
                 'Content-Range: bytes ' . $start . '-' . $end . '/' . $totalBytes,
                 'Content-Length: ' . strlen($chunkData),
