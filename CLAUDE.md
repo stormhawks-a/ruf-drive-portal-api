@@ -36,6 +36,30 @@ it; don't assume frontend changes are backed up anywhere until then.
   writer (Natro's PHP build may not have `zip` enabled, and `ZipArchive` would
   need buffering to a temp file anyway). Writes **zip64 unconditionally** for
   every entry — see gotcha below.
+- **Image thumbnails**: `GET /files/{id}/thumbnail?size=N` proxies Drive's own
+  pre-generated thumbnail (always a small JPEG, regardless of source format)
+  instead of the original file — used by the frontend for jpg/png previews
+  (grid cards, folder mini-collages, the preview modal) so browsing large
+  photos is fast. Same auth/scope check as `files_download`, just a different
+  byte source. The real download endpoint is untouched and always streams the
+  original via `streamFile()`. Drive's `thumbnailLink` needs a fresh
+  `files.get` metadata call every time (no caching), so this has the same
+  multi-second Drive round-trip latency as any other Drive API call — expect
+  it, don't chase it as a bug.
+- **Persistent share links are two independent slots per customer**, not one
+  "the current link" — `shared_links_get_by_customer` takes a `viewMode`
+  query param (`customer` = full panel, `consumer` = download-only) and only
+  ever looks at/revokes the matching slot. Renewing one mode must never touch
+  the other's still-valid link; if a "renew" or "revoke" flow ever stops
+  taking `viewMode` explicitly, this guarantee breaks silently.
+- **Reversible password storage** (`users.password_encrypted`,
+  `shared_links.password_encrypted`): AES-256-GCM via `lib/Crypto.php`,
+  purely so an admin can look up "what did we set this to" from an edit
+  form. `password_hash` (bcrypt) remains the only thing actually checked at
+  login — the encrypted copy is never used for auth, and is only ever
+  returned by narrow, role-gated, single-record endpoints
+  (`GET /users/{id}/password` is `ADMIN`-only), never bundled into list
+  responses.
 - **Real folder downloads** (no ZIP at all): the frontend uses the File System
   Access API (`showDirectoryPicker`) for Chrome/Edge, falling back to the ZIP
   endpoint for Safari/Firefox, which don't implement that API.
@@ -149,7 +173,19 @@ it; don't assume frontend changes are backed up anywhere until then.
    double-check DB state (`SELECT ... WHERE name LIKE '%realcustomername%'`)
    before and after any test run that touches real-looking data.
 
-9. **`window.showDirectoryPicker()` can't be driven by browser automation.**
+9. **PHP's default timezone silently disagrees with MySQL's.** With no
+   `date_default_timezone_set()` call anywhere, PHP defaults to UTC while
+   MySQL's `NOW()`/`CURRENT_TIMESTAMP` follow the server's local timezone
+   (`Europe/Istanbul`, UTC+3 here). Using PHP's `date('Y-m-d H:i:s')` for a
+   value like `deleted_at` while `created_at` was set by MySQL's own
+   `CURRENT_TIMESTAMP` produced a `deleted_at` that could read as *before*
+   `created_at` by exactly the UTC offset. Fixed by calling
+   `date_default_timezone_set('Europe/Istanbul')` once in `bootstrap.php` and,
+   more importantly, always using `NOW()` in the SQL itself instead of
+   PHP-generated timestamps for anything that's compared against MySQL's own
+   timestamp columns.
+
+10. **`window.showDirectoryPicker()` can't be driven by browser automation.**
    It's a native OS dialog, not something Playwright can click through. To
    test the real-folder-download logic (`src/lib/folderDownload.ts`), mock
    `window.showDirectoryPicker` to return a fake in-memory
