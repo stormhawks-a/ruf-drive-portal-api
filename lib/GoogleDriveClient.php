@@ -60,6 +60,122 @@ final class GoogleDriveClient
         return $data['id'];
     }
 
+    /**
+     * Opens a resumable upload session for a file whose bytes will arrive in chunks
+     * (see routes/file_uploads.php) — the server never has to hold the whole file in
+     * memory or a single HTTP request. Returns the one-time session URI that every
+     * subsequent chunk PUT targets.
+     */
+    public static function createResumableSession(string $name, ?string $parentId, string $mimeType, int $totalBytes): string
+    {
+        $metadata = ['name' => $name];
+        if ($parentId !== null) {
+            $metadata['parents'] = [$parentId];
+        }
+
+        $ch = curl_init(self::UPLOAD_BASE . '/files?uploadType=resumable&fields=id');
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => json_encode($metadata),
+            CURLOPT_HEADER => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER => [
+                'Authorization: Bearer ' . GoogleOAuth::getAccessToken(),
+                'Content-Type: application/json; charset=UTF-8',
+                'X-Upload-Content-Type: ' . $mimeType,
+                'X-Upload-Content-Length: ' . $totalBytes,
+            ],
+        ]);
+        $response = curl_exec($ch);
+        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        if ($response === false || $status >= 400) {
+            throw new RuntimeException('Drive resumable oturumu baslatilamadi (HTTP ' . $status . ').');
+        }
+        $headers = substr($response, 0, $headerSize);
+        if (!preg_match('/^Location:\s*(\S+)/mi', $headers, $m)) {
+            throw new RuntimeException('Drive oturum adresi alinamadi.');
+        }
+        return trim($m[1]);
+    }
+
+    /**
+     * PUTs one chunk of a resumable session. $start is this chunk's byte offset in
+     * the overall file. Returns bytesReceived (Drive's own count, read back from its
+     * response — never assumed) and, once Drive has every byte, the finished file id.
+     */
+    public static function uploadChunk(string $sessionUri, string $chunkData, int $start, int $totalBytes): array
+    {
+        $end = $start + strlen($chunkData) - 1;
+        $ch = curl_init($sessionUri);
+        curl_setopt_array($ch, [
+            CURLOPT_CUSTOMREQUEST => 'PUT',
+            CURLOPT_POSTFIELDS => $chunkData,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HEADER => true,
+            CURLOPT_TIMEOUT => 180,
+            CURLOPT_HTTPHEADER => [
+                'Content-Range: bytes ' . $start . '-' . $end . '/' . $totalBytes,
+                'Content-Length: ' . strlen($chunkData),
+            ],
+        ]);
+        $response = curl_exec($ch);
+        if ($response === false) {
+            throw new RuntimeException('Drive baglantisi basarisiz: ' . curl_error($ch));
+        }
+        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        $headers = substr($response, 0, $headerSize);
+        $body = substr($response, $headerSize);
+
+        if ($status === 200 || $status === 201) {
+            $data = json_decode($body, true);
+            return ['done' => true, 'fileId' => $data['id'] ?? null, 'bytesReceived' => $totalBytes];
+        }
+        if ($status === 308) {
+            $bytesReceived = $end + 1;
+            if (preg_match('/^Range:\s*bytes=0-(\d+)/mi', $headers, $m)) {
+                $bytesReceived = ((int) $m[1]) + 1;
+            }
+            return ['done' => false, 'fileId' => null, 'bytesReceived' => $bytesReceived];
+        }
+        throw new RuntimeException('Drive parca yuklemesi basarisiz (HTTP ' . $status . '): ' . $body);
+    }
+
+    /**
+     * Asks Drive how many bytes of a resumable session it has actually persisted —
+     * used to recover the true resume point if our own bytes_received bookkeeping
+     * ever falls behind (e.g. the PHP process died right after Drive accepted a
+     * chunk but before our DB update ran).
+     */
+    public static function queryResumableProgress(string $sessionUri, int $totalBytes): int
+    {
+        $ch = curl_init($sessionUri);
+        curl_setopt_array($ch, [
+            CURLOPT_CUSTOMREQUEST => 'PUT',
+            CURLOPT_POSTFIELDS => '',
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HEADER => true,
+            CURLOPT_TIMEOUT => 30,
+            CURLOPT_HTTPHEADER => [
+                'Content-Range: bytes */' . $totalBytes,
+                'Content-Length: 0',
+            ],
+        ]);
+        $response = curl_exec($ch);
+        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        $headers = substr($response, 0, $headerSize);
+
+        if ($status === 200 || $status === 201) {
+            return $totalBytes;
+        }
+        if ($status === 308 && preg_match('/^Range:\s*bytes=0-(\d+)/mi', $headers, $m)) {
+            return ((int) $m[1]) + 1;
+        }
+        return 0;
+    }
+
     /** Streams a Drive file's bytes directly to the current HTTP response (never exposes the Drive URL). */
     public static function streamFile(string $fileId): void
     {

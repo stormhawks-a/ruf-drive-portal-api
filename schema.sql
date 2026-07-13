@@ -191,4 +191,27 @@ CREATE TABLE IF NOT EXISTS app_settings (
   `value` TEXT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- ---------------------------------------------------------------------------
+-- file_uploads: cok buyuk (100MB+) dosyalar icin parca parca/devam ettirilebilir
+-- yukleme oturumlari. drive_session_uri, Drive'in resumable upload protokolunun
+-- verdigi tek seferlik oturum adresidir; her parca oraya PUT edilir, sunucu
+-- hicbir zaman dosyanin tamamini bellege almaz. Oturum tamamlaninca gercek
+-- kayit files tablosuna yazilir ve bu satirin isi biter (status='completed').
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS file_uploads (
+  id                VARCHAR(40)  NOT NULL PRIMARY KEY,
+  parent_id         VARCHAR(40)  NOT NULL,
+  owner_id          VARCHAR(40)  NOT NULL,
+  name              VARCHAR(255) NOT NULL,
+  mime_type         VARCHAR(150) NULL,
+  total_bytes       BIGINT UNSIGNED NOT NULL,
+  bytes_received    BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  drive_session_uri VARCHAR(1000) NOT NULL,
+  status            ENUM('uploading','completed','failed') NOT NULL DEFAULT 'uploading',
+  drive_file_id     VARCHAR(120) NULL,
+  created_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_file_uploads_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET FOREIGN_KEY_CHECKS = 1;
