@@ -302,6 +302,14 @@ function background_settings_stream_media(array $params): void
         Response::error('Medya bulunamadı.', 404);
     }
 
+    // jpg/png backgrounds (single images and both slider sides) are shown full-bleed
+    // on screen, never downloaded — Drive's pre-generated thumbnail at a large size
+    // loads far faster than the original and looks identical there. Videos have no
+    // such thumbnail to play, so they always stream the original bytes.
+    if (in_array($mimeType, ['image/jpeg', 'image/png'], true) && GoogleDriveClient::streamThumbnail($driveFileId, 1920)) {
+        exit;
+    }
+
     header('Content-Type: ' . ($mimeType ?: 'application/octet-stream'));
     header('Cache-Control: private, max-age=3600');
     GoogleDriveClient::streamFile($driveFileId);
@@ -315,6 +323,12 @@ function background_settings_stream_collage(array $params): void
     $row = Db::queryOne('SELECT * FROM background_collage_images WHERE id = ?', [$collageId]);
     if ($row === null) {
         Response::error('Fotoğraf bulunamadı.', 404);
+    }
+
+    // Collage photos are always images — same large pre-generated Drive thumbnail
+    // speedup as background_settings_stream_media above.
+    if (in_array($row['mime_type'], ['image/jpeg', 'image/png'], true) && GoogleDriveClient::streamThumbnail($row['drive_file_id'], 1920)) {
+        exit;
     }
 
     header('Content-Type: ' . ($row['mime_type'] ?: 'application/octet-stream'));
