@@ -82,6 +82,46 @@ it; don't assume frontend changes are backed up anywhere until then.
 - **Real folder downloads** (no ZIP at all): the frontend uses the File System
   Access API (`showDirectoryPicker`) for Chrome/Edge, falling back to the ZIP
   endpoint for Safari/Firefox, which don't implement that API.
+- **Large file uploads (100MB–tens of GB)**: `routes/file_uploads.php` +
+  `GoogleDriveClient::createResumableSession/uploadChunk`. The browser (see
+  `uploadLargeWithProgress` in `src/api.ts`) slices the file into 16MB chunks
+  and `PUT`s them one at a time to `/file-uploads/{id}/chunk`; this server
+  relays each chunk straight into a Drive resumable-upload session and never
+  buffers more than one chunk in memory, so the file size this can handle
+  isn't bounded by PHP's `memory_limit`. `filesApi.createWithProgress()`
+  switches to this path automatically above `LARGE_UPLOAD_THRESHOLD_BYTES`
+  (80MB) — everything below that still goes through the old single-request
+  multipart POST. A dropped chunk retries with exponential backoff and
+  re-queries `/file-uploads/{id}` for the real byte count before resending,
+  so a flaky connection resumes instead of restarting the whole file.
+  **A direct browser→Drive upload (skipping this server as a relay entirely)
+  is not possible** — verified with a real browser test against a live Drive
+  resumable session: Google's upload endpoint sends no
+  `Access-Control-Allow-Origin` header, so the browser blocks it as a CORS
+  violation before any bytes move. Don't re-attempt this; it's a Google-side
+  limitation, not something fixable from our code.
+- **Downloads survive very large files too**: `files_download` sets
+  `@set_time_limit(0)` (a many-GB download can outlast PHP's default limit on
+  an ordinary connection) and forwards an incoming `Range` header straight to
+  Drive's own `alt=media` endpoint, which honors it natively — this is what
+  lets a browser's built-in "resume interrupted download" actually work,
+  responding `206 Partial Content` with the right `Content-Range`.
+- **Turkish-text search correctness** (`src/lib/text.ts`, `trLower()`): plain
+  `.toLowerCase()` gets Turkish wrong in two independent, easy-to-miss ways —
+  don't use it for any search/filter comparison in this codebase. (1) Casing:
+  `"İ".toLowerCase()` → `"i̇"` (i + a combining dot, not a plain `"i"`), and
+  `"I".toLowerCase()` → `"i"` instead of the correct Turkish `"ı"` — so
+  `"FIRAT".toLowerCase()` never matches a search for `"fırat"`.
+  `toLocaleLowerCase("tr")` fixes this. (2) Unicode normalization: "ö", "ş",
+  "ç", "ğ", "ü" can each be stored as one precomposed character or as a plain
+  letter plus a combining accent — visually identical, different string. A
+  folder named on a Mac can end up decomposed while typing the same letters
+  into the browser's search box produces the composed form, so `"köşe"` won't
+  `.includes()`-match a folder actually named "köşe" without normalizing both
+  sides first. `trLower()` does `.normalize("NFC")` before lowercasing to
+  cover this. Every search/filter comparison in `DriveInterface.tsx` and
+  `LogPanel.tsx` goes through this one helper — route any new search feature
+  through it too rather than reaching for `.toLowerCase()` directly.
 
 ## Deployment (Natro shared hosting)
 
@@ -212,3 +252,54 @@ it; don't assume frontend changes are backed up anywhere until then.
    `getFileHandle`/`getDirectoryHandle`/write call) via `page.addInitScript`,
    and assert on the resulting tree — this actually exercises the recursive
    folder-writing logic instead of just trusting it compiles.
+
+11. **A self-imposed timeout, not shared hosting itself, caused a pathological
+    upload slowdown.** A real 15GB production upload crawled at 2.5KB/s–2MB/s
+    with wild swings. Root cause: both `GoogleDriveClient::uploadChunk`'s own
+    curl timeout and `file_uploads_chunk`'s `set_time_limit` were set to 180s
+    — comfortably enough on a fast connection, but on Natro's actual
+    (slower/variable) outbound leg to Drive, a 64MB chunk could legitimately
+    need longer than that, so it kept getting killed mid-flight and retried
+    from scratch. Looked exactly like "the hosting is just slow," but the
+    fix was raising both to 1800s and shrinking the chunk size (64MB → 16MB,
+    `UPLOAD_CHUNK_BYTES` in `src/api.ts`) so any one chunk risks less work.
+    If upload speed ever looks erratic (not just uniformly slow) again,
+    suspect a timeout-and-retry loop before suspecting raw bandwidth — a
+    *uniformly* capped connection doesn't produce that kind of swing.
+
+12. **Mobile layout for the staff (ADMIN/EDITOR) dashboard is a from-scratch
+    rebuild, not a shrunk desktop layout** — several rounds of real-device bug
+    reports (via screenshots) drove this, so don't casually "simplify" it back
+    toward the desktop structure:
+    - The bulk-selection action bar (Paylaş/İndir/Sil/Kaldır) is
+      `position: fixed` to the viewport bottom on `< md`, with the buttons
+      collapsed to icon-only (labels return at `sm:` and up) — the scrollable
+      file/folder list needs matching bottom padding (`pb-20` conditionally
+      applied) so its last row isn't hidden underneath.
+    - The mobile top bar (in `App.tsx`, `md:hidden`) consolidates what used to
+      be three separate rows/bars into one: logo+"Ruf'tan" | current user's
+      name+role (plain text, deliberately no avatar circle — user preference,
+      see below) | the hamburger that opens the nav drawer.
+    - The old bottom `RoleSelector` bar is hidden on mobile **only for staff**
+      (`!isWeTransferStyle && !isConsumerStyle`) — its two actions (İşlem
+      Logları, Çıkış Yap) moved into the drawer's footer instead. It's
+      deliberately **not** hidden for real customer logins on mobile: their
+      layout (Layout B / WeTransfer-style) has no drawer or equivalent
+      replacement, so hiding it there would remove their only way to log out.
+    - Avatar-circle-with-initial next to a name+role was removed everywhere it
+      showed the *current logged-in user* (top bar, `DriveInterface`'s
+      desktop toolbar pill) per explicit user request — plain text only.
+      Don't add it back reflexively; it wasn't an oversight.
+    - The phone/browser back button used to just exit the app no matter how
+      deep you'd navigated, because `activeFolderId`/`showPersonnelView`
+      changes never touched browser history at all. Fixed in `App.tsx` by
+      mirroring both into `history.pushState`/`popstate` (with a ref flag to
+      avoid re-pushing when a `popstate` event itself is what triggered the
+      state change) — verified with `page.goBack()` in a real browser, not
+      just by reading the code.
+    - Uploads silently filter out OS-generated junk (`._*` AppleDouble files —
+      macOS creates one per file on non-native filesystems like exFAT/FAT32
+      SD cards/USB drives — plus `.DS_Store`, `Thumbs.db`, `desktop.ini`)
+      before queueing, in `executeUploadBatch` (`DriveInterface.tsx`) — the
+      one choke point every upload path (drag-drop, file picker, folder
+      picker) already funnels through.
