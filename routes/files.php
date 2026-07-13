@@ -119,10 +119,64 @@ function files_download(array $params): void
         Response::error('Bu dosya için depolanmış bir kopya yok.', 404);
     }
 
+    // A many-GB download can easily take longer than PHP's default execution-time
+    // cap on a normal connection — without this it gets killed mid-stream.
+    @set_time_limit(0);
+
+    $totalSize = (int) $file['size_bytes'];
+    header('Accept-Ranges: bytes');
     header('Content-Type: ' . ($file['mime_type'] ?: 'application/octet-stream'));
     header('Content-Disposition: attachment; filename="' . str_replace('"', '', $file['name']) . '"');
+
+    // Honor Range requests so a dropped connection resumes the rest of a huge file
+    // instead of restarting it from byte zero — this is what makes browsers'
+    // built-in "resume download" work at all; without Accept-Ranges/206 support
+    // they silently fall back to downloading everything again from scratch.
+    $range = files_parse_range_header($_SERVER['HTTP_RANGE'] ?? null, $totalSize);
+    if ($range !== null) {
+        [$start, $end] = $range;
+        http_response_code(206);
+        header("Content-Range: bytes {$start}-{$end}/{$totalSize}");
+        header('Content-Length: ' . ($end - $start + 1));
+        GoogleDriveClient::streamFileTo($file['drive_file_id'], function (string $chunk): void {
+            echo $chunk;
+        }, "bytes={$start}-{$end}");
+        exit;
+    }
+
+    if ($totalSize > 0) {
+        header('Content-Length: ' . $totalSize);
+    }
     GoogleDriveClient::streamFile($file['drive_file_id']);
     exit;
+}
+
+/** Parses a "Range: bytes=start-end" (or open-ended "start-" / suffix "-N") header
+    into a validated [start, end] pair, or null if absent/unsatisfiable — in which
+    case the caller should just serve the whole file instead of erroring out. */
+function files_parse_range_header(?string $rangeHeader, int $totalSize): ?array
+{
+    if ($rangeHeader === null || $totalSize <= 0 || !preg_match('/^bytes=(\d*)-(\d*)$/', trim($rangeHeader), $m)) {
+        return null;
+    }
+    $reqStart = $m[1] === '' ? null : (int) $m[1];
+    $reqEnd = $m[2] === '' ? null : (int) $m[2];
+
+    if ($reqStart === null && $reqEnd === null) {
+        return null;
+    }
+    if ($reqStart === null) {
+        // Suffix form ("-500" = last 500 bytes).
+        $start = max(0, $totalSize - $reqEnd);
+        $end = $totalSize - 1;
+    } else {
+        $start = $reqStart;
+        $end = $reqEnd !== null ? min($reqEnd, $totalSize - 1) : $totalSize - 1;
+    }
+    if ($start < 0 || $start > $end || $start >= $totalSize) {
+        return null;
+    }
+    return [$start, $end];
 }
 
 /** Same access rules as files_download, but serves a small pre-generated Drive

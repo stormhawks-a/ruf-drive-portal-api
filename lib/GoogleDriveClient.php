@@ -188,12 +188,20 @@ final class GoogleDriveClient
      * Streams a Drive file's bytes chunk-by-chunk through a callback instead of
      * echoing directly — lets callers (e.g. the ZIP writer) both forward the bytes
      * and track running size/CRC32 without ever buffering the whole file in memory.
+     * An optional Range (e.g. "bytes=1000-1999") is forwarded to Drive as-is —
+     * Drive's own alt=media endpoint honors it and returns just that slice, which is
+     * what lets files_download resume an interrupted download instead of restarting
+     * a possibly tens-of-GB file from byte zero.
      */
-    public static function streamFileTo(string $fileId, callable $onChunk): void
+    public static function streamFileTo(string $fileId, callable $onChunk, ?string $range = null): void
     {
+        $headers = ['Authorization: Bearer ' . GoogleOAuth::getAccessToken()];
+        if ($range !== null) {
+            $headers[] = 'Range: ' . $range;
+        }
         $ch = curl_init(self::API_BASE . '/files/' . urlencode($fileId) . '?alt=media');
         curl_setopt_array($ch, [
-            CURLOPT_HTTPHEADER => ['Authorization: Bearer ' . GoogleOAuth::getAccessToken()],
+            CURLOPT_HTTPHEADER => $headers,
             CURLOPT_RETURNTRANSFER => false,
             CURLOPT_WRITEFUNCTION => function ($ch, $chunk) use ($onChunk) {
                 $onChunk($chunk);
