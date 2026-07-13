@@ -52,6 +52,25 @@ it; don't assume frontend changes are backed up anywhere until then.
   ever looks at/revokes the matching slot. Renewing one mode must never touch
   the other's still-valid link; if a "renew" or "revoke" flow ever stops
   taking `viewMode` explicitly, this guarantee breaks silently.
+- **Background media (`background_settings` / `background_collage_images`)** is
+  real server state now, not a leftover-from-the-demo `localStorage` blob — it
+  used to live entirely in the browser that last opened Settings, so a
+  background configured on one computer was invisible on every other device/
+  share-link visitor (the actual bug that motivated building this). Media
+  files live in Drive under a lazily-created "Site Arkaplanlari" folder
+  (`app_settings.background_media_drive_folder_id`, same lazy-create-once
+  pattern as `drive_root_folder_id`); the DB rows only ever hold
+  `drive_file_id_1`/`drive_file_id_2` plus text/CTA fields. `GET
+  /background-settings` and the two media-streaming routes use the same
+  dual-auth check as `files_download` (`Auth::currentUser() ?? share-link
+  session`) — any staff login, real customer, or anonymous share-link visitor
+  can read it, since the background shows in all three contexts; only
+  create/update/delete/upload are `ADMIN`-only. `api/.user.ini` raises
+  `upload_max_filesize`/`post_max_size` to 100M for this (PHP's 2-8M defaults
+  were fine for tiny JSON bodies but rejected anything but a small photo) — if
+  a production upload still fails above a few MB, set the same values via
+  cPanel's MultiPHP INI Editor instead, since `.user.ini` only takes effect
+  under CGI/FastCGI PHP, not mod_php.
 - **Reversible password storage** (`users.password_encrypted`,
   `shared_links.password_encrypted`): AES-256-GCM via `lib/Crypto.php`,
   purely so an admin can look up "what did we set this to" from an edit
