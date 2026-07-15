@@ -208,10 +208,32 @@ function folders_restore(array $params): void
     Response::json(['ok' => true]);
 }
 
+/**
+ * Registers one folder-level download for the stats leaderboard. The browser's
+ * native "download as real folder structure" path (File System Access API,
+ * see src/lib/folderDownload.ts) fetches each file inside individually rather
+ * than going through the ZIP endpoint — those individual fetches pass
+ * ?skipCount=1 so files_download doesn't count each one separately, and the
+ * frontend calls this once per top-level folder instead, exactly mirroring
+ * how zip_download counts a folder once regardless of how many files it holds.
+ */
+function folders_register_download(array $params): void
+{
+    $user = Auth::currentUser() ?? shared_links_resolve_acting_user();
+    if ($user === null) {
+        Response::error('Oturum açmanız gerekiyor.', 401);
+    }
+    $id = $params['id'];
+    Scope::assertFolderAccessible($user, $id);
+    Db::execute('UPDATE folders SET download_count = download_count + 1 WHERE id = ?', [$id]);
+    Response::json(['ok' => true]);
+}
+
 return [
     ['GET', '#^/folders$#', 'folders_list'],
     ['POST', '#^/folders$#', 'folders_create'],
     ['PUT', '#^/folders/(?P<id>[a-zA-Z0-9_]+)$#', 'folders_update'],
     ['DELETE', '#^/folders/(?P<id>[a-zA-Z0-9_]+)$#', 'folders_delete'],
     ['POST', '#^/folders/(?P<id>[a-zA-Z0-9_]+)/restore$#', 'folders_restore'],
+    ['POST', '#^/folders/(?P<id>[a-zA-Z0-9_]+)/register-download$#', 'folders_register_download'],
 ];

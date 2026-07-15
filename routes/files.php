@@ -108,6 +108,15 @@ function files_download(array $params): void
     $rangeForCounting = files_parse_range_header($_SERVER['HTTP_RANGE'] ?? null, (int) $file['size_bytes']);
     $isContinuation = $rangeForCounting !== null && $rangeForCounting[0] > 0;
 
+    // The browser's native "download as real folder structure" path (File System
+    // Access API) fetches every file inside a selected folder through this very
+    // endpoint, one request per file — those pass ?skipCount=1 so a folder with
+    // 50 files doesn't turn into 50 rows on the download-stats leaderboard; the
+    // frontend instead registers ONE download against the folder itself (see
+    // folders_register_download). A file the user picked individually never
+    // sets this flag, so it still counts on its own as before.
+    $skipCount = isset($_GET['skipCount']) && $_GET['skipCount'] === '1';
+
     // Two ways in: a real logged-in account scoped to this file's folder, or an
     // unlocked share-link session whose shared scope includes this file.
     $user = Auth::currentUser();
@@ -115,7 +124,9 @@ function files_download(array $params): void
         Scope::assertFolderAccessible($user, $file['parent_id']);
         if (!$isContinuation) {
             AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_DOWNLOAD', "Dosya indirildi: {$file['name']}");
-            Db::execute('UPDATE files SET download_count = download_count + 1 WHERE id = ?', [$id]);
+            if (!$skipCount) {
+                Db::execute('UPDATE files SET download_count = download_count + 1 WHERE id = ?', [$id]);
+            }
         }
     } else {
         $shareLinkId = Auth::currentShareLinkId();
@@ -124,7 +135,9 @@ function files_download(array $params): void
         }
         if (!$isContinuation) {
             Db::execute('UPDATE shared_links SET download_count = download_count + 1 WHERE id = ?', [$shareLinkId]);
-            Db::execute('UPDATE files SET download_count = download_count + 1 WHERE id = ?', [$id]);
+            if (!$skipCount) {
+                Db::execute('UPDATE files SET download_count = download_count + 1 WHERE id = ?', [$id]);
+            }
         }
     }
 
