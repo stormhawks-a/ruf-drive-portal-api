@@ -57,6 +57,7 @@ function zip_collect_folder_recursive(array $folder, string $pathPrefix, array &
     }
 }
 
+/** @return array{entries: array, fileIds: array} */
 function zip_collect_entries(array $fileIds, array $folderIds): array
 {
     $entries = [];
@@ -86,7 +87,7 @@ function zip_collect_entries(array $fileIds, array $folderIds): array
         zip_collect_folder_recursive($root, $root['name'], $entries, $seenFileIds);
     }
 
-    return $entries;
+    return ['entries' => $entries, 'fileIds' => $seenFileIds];
 }
 
 function zip_download(array $params): void
@@ -127,7 +128,8 @@ function zip_download(array $params): void
         }
     }
 
-    $entries = zip_collect_entries($fileIds, $folderIds);
+    $collected = zip_collect_entries($fileIds, $folderIds);
+    $entries = $collected['entries'];
     if (empty($entries)) {
         Response::error('İndirilebilir gerçek dosya bulunamadı.', 404);
     }
@@ -146,6 +148,10 @@ function zip_download(array $params): void
 
     if ($user !== null) {
         AuditLogger::log($user['id'], $user['name'], $user['role'], 'BULK_DOWNLOAD', count($entries) . ' dosya ZIP olarak indirildi.');
+    }
+    if (!empty($collected['fileIds'])) {
+        $idPlaceholders = implode(',', array_fill(0, count($collected['fileIds']), '?'));
+        Db::execute("UPDATE files SET download_count = download_count + 1 WHERE id IN ($idPlaceholders)", $collected['fileIds']);
     }
 
     $requestedName = trim((string) ($_GET['name'] ?? ''));

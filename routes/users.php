@@ -23,7 +23,9 @@ function users_get_password(array $params): void
 
 function users_create(array $params): void
 {
-    $actor = Auth::requireRole('ADMIN');
+    // Editors may only ever create CUSTOMER panels — managing staff (ADMIN/EDITOR)
+    // accounts stays admin-exclusive.
+    $actor = Auth::requireRole(['ADMIN', 'EDITOR']);
     $body = Response::body();
 
     $name = trim((string) ($body['name'] ?? ''));
@@ -33,6 +35,9 @@ function users_create(array $params): void
 
     if ($name === '' || !in_array($role, ['ADMIN', 'EDITOR', 'CUSTOMER'], true)) {
         Response::error('Ad ve geçerli bir rol zorunlu.', 422);
+    }
+    if ($actor['role'] === 'EDITOR' && $role !== 'CUSTOMER') {
+        Response::error('Bu işlem için yetkiniz yok.', 403);
     }
     if ($role !== 'CUSTOMER' && $username === null) {
         Response::error('Personel hesapları için kullanıcı adı zorunlu.', 422);
@@ -96,13 +101,21 @@ function users_create(array $params): void
 
 function users_update(array $params): void
 {
-    $actor = Auth::requireRole('ADMIN');
+    // Same boundary as users_create: an editor may only touch CUSTOMER records,
+    // never their own or another staff member's ADMIN/EDITOR account.
+    $actor = Auth::requireRole(['ADMIN', 'EDITOR']);
     $id = $params['id'];
     $body = Response::body();
 
     $target = Db::queryOne('SELECT * FROM users WHERE id = ?', [$id]);
     if ($target === null) {
         Response::error('Kullanıcı bulunamadı.', 404);
+    }
+    if ($actor['role'] === 'EDITOR' && $target['role'] !== 'CUSTOMER') {
+        Response::error('Bu işlem için yetkiniz yok.', 403);
+    }
+    if ($actor['role'] === 'EDITOR' && array_key_exists('role', $body) && $body['role'] !== 'CUSTOMER') {
+        Response::error('Bu işlem için yetkiniz yok.', 403);
     }
 
     $fields = [];
@@ -140,7 +153,7 @@ function users_update(array $params): void
 
 function users_delete(array $params): void
 {
-    $actor = Auth::requireRole('ADMIN');
+    $actor = Auth::requireRole(['ADMIN', 'EDITOR']);
     $id = $params['id'];
 
     if ($id === $actor['id']) {
@@ -150,6 +163,9 @@ function users_delete(array $params): void
     $target = Db::queryOne('SELECT * FROM users WHERE id = ?', [$id]);
     if ($target === null) {
         Response::error('Kullanıcı bulunamadı.', 404);
+    }
+    if ($actor['role'] === 'EDITOR' && $target['role'] !== 'CUSTOMER') {
+        Response::error('Bu işlem için yetkiniz yok.', 403);
     }
 
     // A plain DELETE FROM users used to fail with an uncaught FK violation (surfaced

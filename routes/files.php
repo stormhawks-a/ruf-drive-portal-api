@@ -101,18 +101,31 @@ function files_download(array $params): void
         Response::error('Dosya bulunamadı.', 404);
     }
 
+    // A resumed/seeked transfer re-hits this same endpoint with a Range header
+    // that picks up mid-file — only a request starting at byte 0 (or with no
+    // Range at all) is a genuinely NEW download; counting every continuation
+    // would wildly inflate the download-count stats below for any large file.
+    $rangeForCounting = files_parse_range_header($_SERVER['HTTP_RANGE'] ?? null, (int) $file['size_bytes']);
+    $isContinuation = $rangeForCounting !== null && $rangeForCounting[0] > 0;
+
     // Two ways in: a real logged-in account scoped to this file's folder, or an
     // unlocked share-link session whose shared scope includes this file.
     $user = Auth::currentUser();
     if ($user !== null) {
         Scope::assertFolderAccessible($user, $file['parent_id']);
-        AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_DOWNLOAD', "Dosya indirildi: {$file['name']}");
+        if (!$isContinuation) {
+            AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_DOWNLOAD', "Dosya indirildi: {$file['name']}");
+            Db::execute('UPDATE files SET download_count = download_count + 1 WHERE id = ?', [$id]);
+        }
     } else {
         $shareLinkId = Auth::currentShareLinkId();
         if ($shareLinkId === null || !shared_links_grants_file($shareLinkId, $file)) {
             Response::error('Oturum açmanız gerekiyor.', 401);
         }
-        Db::execute('UPDATE shared_links SET download_count = download_count + 1 WHERE id = ?', [$shareLinkId]);
+        if (!$isContinuation) {
+            Db::execute('UPDATE shared_links SET download_count = download_count + 1 WHERE id = ?', [$shareLinkId]);
+            Db::execute('UPDATE files SET download_count = download_count + 1 WHERE id = ?', [$id]);
+        }
     }
 
     if ($file['drive_file_id'] === null) {
@@ -271,9 +284,50 @@ function files_restore(array $params): void
     Response::json(['ok' => true]);
 }
 
+/** Admin-only download leaderboard — most-downloaded file first, each with its
+    full folder path so two same-named files in different folders aren't
+    ambiguous in the list. */
+function files_download_stats(array $params): void
+{
+    Auth::requireRole('ADMIN');
+
+    $rows = Db::query(
+        'SELECT id, name, parent_id, download_count FROM files WHERE deleted_at IS NULL AND download_count > 0 ORDER BY download_count DESC'
+    );
+
+    $folderRows = Db::query('SELECT id, name, parent_id FROM folders');
+    $foldersById = [];
+    foreach ($folderRows as $folder) {
+        $foldersById[$folder['id']] = $folder;
+    }
+
+    $buildFolderPath = function (?string $parentId) use (&$buildFolderPath, $foldersById): string {
+        if ($parentId === null || !isset($foldersById[$parentId])) {
+            return '';
+        }
+        $folder = $foldersById[$parentId];
+        $prefix = $buildFolderPath($folder['parent_id']);
+        return $prefix === '' ? $folder['name'] : "{$prefix} / {$folder['name']}";
+    };
+
+    $result = [];
+    foreach ($rows as $row) {
+        $folderPath = $buildFolderPath($row['parent_id']);
+        $result[] = [
+            'id' => $row['id'],
+            'name' => $row['name'],
+            'downloadCount' => (int) $row['download_count'],
+            'path' => $folderPath === '' ? $row['name'] : "{$folderPath} / {$row['name']}",
+        ];
+    }
+
+    Response::json(['files' => $result]);
+}
+
 return [
     ['GET', '#^/files$#', 'files_list'],
     ['POST', '#^/files$#', 'files_create'],
+    ['GET', '#^/files/download-stats$#', 'files_download_stats'],
     ['GET', '#^/files/(?P<id>[a-zA-Z0-9_]+)/download$#', 'files_download'],
     ['GET', '#^/files/(?P<id>[a-zA-Z0-9_]+)/thumbnail$#', 'files_thumbnail'],
     ['PUT', '#^/files/(?P<id>[a-zA-Z0-9_]+)$#', 'files_update'],

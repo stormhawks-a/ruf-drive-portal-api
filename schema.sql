@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS files (
   parent_id        VARCHAR(40)  NULL,
   owner_id         VARCHAR(40)  NOT NULL,
   drive_file_id    VARCHAR(120) NULL,
+  download_count   INT UNSIGNED NOT NULL DEFAULT 0,
   created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   deleted_at       DATETIME     NULL,
