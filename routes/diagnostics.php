@@ -119,6 +119,42 @@ function diagnostics_upload_speed_test(array $params): void
     ]);
 }
 
+/**
+ * Isolates the BROWSER-to-this-server leg specifically, with Drive taken
+ * completely out of the picture: just reads whatever the browser sends and
+ * discards it, timing purely that one hop. Used alongside
+ * diagnostics_upload_speed_test (which times only server-to-Drive) to figure
+ * out which of the two legs in browser -> our server -> Drive is actually the
+ * slow one, since a real upload's overall speed can never beat whichever leg
+ * is slowest.
+ */
+function diagnostics_echo_upload(array $params): void
+{
+    Auth::requireRole('ADMIN');
+    @set_time_limit(120);
+
+    $t0 = microtime(true);
+    $bytesReceived = 0;
+    $input = fopen('php://input', 'rb');
+    while (!feof($input)) {
+        $chunk = fread($input, 1024 * 1024);
+        if ($chunk === false) {
+            break;
+        }
+        $bytesReceived += strlen($chunk);
+    }
+    fclose($input);
+    $seconds = microtime(true) - $t0;
+
+    $mb = $bytesReceived / (1024 * 1024);
+    Response::json([
+        'mbReceived' => round($mb, 2),
+        'seconds' => round($seconds, 2),
+        'mbPerSecond' => $seconds > 0 ? round($mb / $seconds, 2) : null,
+    ]);
+}
+
 return [
     ['GET', '#^/diagnostics/upload-speed-test$#', 'diagnostics_upload_speed_test'],
+    ['POST', '#^/diagnostics/echo-upload$#', 'diagnostics_echo_upload'],
 ];
