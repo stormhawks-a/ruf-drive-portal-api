@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS folders (
   name              VARCHAR(255) NOT NULL,
   parent_id         VARCHAR(40)  NULL,
   drive_folder_id   VARCHAR(120) NULL,
+  download_count    INT UNSIGNED NOT NULL DEFAULT 0,
   created_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   deleted_at        DATETIME     NULL,
   deleted_by        VARCHAR(40)  NULL,

@@ -57,11 +57,22 @@ function zip_collect_folder_recursive(array $folder, string $pathPrefix, array &
     }
 }
 
-/** @return array{entries: array, fileIds: array} */
+/**
+ * @return array{entries: array, directFileIds: array, processedFolderIds: array}
+ *
+ * directFileIds / processedFolderIds are kept separate on purpose: a file the
+ * user explicitly picked counts as a FILE download in the stats panel, while a
+ * file that merely happens to live inside an explicitly-picked FOLDER should
+ * only bump that folder's own count — not every file inside it individually
+ * (otherwise downloading one folder with 50 files explodes into 50 rows in the
+ * download-stats list instead of the one folder the user actually downloaded).
+ */
 function zip_collect_entries(array $fileIds, array $folderIds): array
 {
     $entries = [];
     $seenFileIds = [];
+    $directFileIds = [];
+    $processedFolderIds = [];
 
     if (!empty($fileIds)) {
         $placeholders = implode(',', array_fill(0, count($fileIds), '?'));
@@ -76,6 +87,7 @@ function zip_collect_entries(array $fileIds, array $folderIds): array
                 'size' => (int) $row['size_bytes'],
             ];
             $seenFileIds[] = $row['id'];
+            $directFileIds[] = $row['id'];
         }
     }
 
@@ -85,9 +97,10 @@ function zip_collect_entries(array $fileIds, array $folderIds): array
             continue;
         }
         zip_collect_folder_recursive($root, $root['name'], $entries, $seenFileIds);
+        $processedFolderIds[] = $root['id'];
     }
 
-    return ['entries' => $entries, 'fileIds' => $seenFileIds];
+    return ['entries' => $entries, 'directFileIds' => $directFileIds, 'processedFolderIds' => $processedFolderIds];
 }
 
 function zip_download(array $params): void
@@ -149,9 +162,13 @@ function zip_download(array $params): void
     if ($user !== null) {
         AuditLogger::log($user['id'], $user['name'], $user['role'], 'BULK_DOWNLOAD', count($entries) . ' dosya ZIP olarak indirildi.');
     }
-    if (!empty($collected['fileIds'])) {
-        $idPlaceholders = implode(',', array_fill(0, count($collected['fileIds']), '?'));
-        Db::execute("UPDATE files SET download_count = download_count + 1 WHERE id IN ($idPlaceholders)", $collected['fileIds']);
+    if (!empty($collected['directFileIds'])) {
+        $idPlaceholders = implode(',', array_fill(0, count($collected['directFileIds']), '?'));
+        Db::execute("UPDATE files SET download_count = download_count + 1 WHERE id IN ($idPlaceholders)", $collected['directFileIds']);
+    }
+    if (!empty($collected['processedFolderIds'])) {
+        $idPlaceholders = implode(',', array_fill(0, count($collected['processedFolderIds']), '?'));
+        Db::execute("UPDATE folders SET download_count = download_count + 1 WHERE id IN ($idPlaceholders)", $collected['processedFolderIds']);
     }
 
     $requestedName = trim((string) ($_GET['name'] ?? ''));

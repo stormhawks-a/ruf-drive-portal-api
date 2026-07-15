@@ -284,20 +284,26 @@ function files_restore(array $params): void
     Response::json(['ok' => true]);
 }
 
-/** Admin-only download leaderboard — most-downloaded file first, each with its
-    full folder path so two same-named files in different folders aren't
-    ambiguous in the list. */
+/** Admin-only download leaderboard — most-downloaded item first, each with its
+    full folder path so two same-named items in different folders aren't
+    ambiguous in the list. A downloaded FOLDER is its own single row (however
+    many files it contains) — it never explodes into one row per file inside
+    it, since files.download_count is only bumped for individually-picked
+    files, not ones swept up as part of a folder download (see zip.php). */
 function files_download_stats(array $params): void
 {
     Auth::requireRole('ADMIN');
 
-    $rows = Db::query(
-        'SELECT id, name, parent_id, download_count FROM files WHERE deleted_at IS NULL AND download_count > 0 ORDER BY download_count DESC'
+    $fileRows = Db::query(
+        'SELECT id, name, parent_id, download_count FROM files WHERE deleted_at IS NULL AND download_count > 0'
+    );
+    $downloadedFolderRows = Db::query(
+        'SELECT id, name, parent_id, download_count FROM folders WHERE deleted_at IS NULL AND download_count > 0'
     );
 
-    $folderRows = Db::query('SELECT id, name, parent_id FROM folders');
+    $allFolderRows = Db::query('SELECT id, name, parent_id FROM folders');
     $foldersById = [];
-    foreach ($folderRows as $folder) {
+    foreach ($allFolderRows as $folder) {
         $foldersById[$folder['id']] = $folder;
     }
 
@@ -311,15 +317,28 @@ function files_download_stats(array $params): void
     };
 
     $result = [];
-    foreach ($rows as $row) {
+    foreach ($fileRows as $row) {
         $folderPath = $buildFolderPath($row['parent_id']);
         $result[] = [
             'id' => $row['id'],
+            'type' => 'file',
             'name' => $row['name'],
             'downloadCount' => (int) $row['download_count'],
             'path' => $folderPath === '' ? $row['name'] : "{$folderPath} / {$row['name']}",
         ];
     }
+    foreach ($downloadedFolderRows as $row) {
+        $ancestorPath = $buildFolderPath($row['parent_id']);
+        $result[] = [
+            'id' => $row['id'],
+            'type' => 'folder',
+            'name' => $row['name'],
+            'downloadCount' => (int) $row['download_count'],
+            'path' => $ancestorPath === '' ? $row['name'] : "{$ancestorPath} / {$row['name']}",
+        ];
+    }
+
+    usort($result, fn (array $a, array $b): int => $b['downloadCount'] <=> $a['downloadCount']);
 
     Response::json(['files' => $result]);
 }
