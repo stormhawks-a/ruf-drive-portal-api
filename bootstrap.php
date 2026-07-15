@@ -30,3 +30,7 @@ set_exception_handler(function (Throwable $e): void {
 });
 
 Auth::startSession();
+// See Auth::releaseSessionLock() — every route except login/logout only reads
+// $_SESSION, so there's no reason to hold PHP's exclusive session file lock for
+// this request's entire lifetime (which, for an upload/download, can be minutes).
+Auth::releaseSessionLock();

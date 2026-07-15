@@ -53,11 +53,30 @@ final class Auth
         }
     }
 
+    /**
+     * Releases the exclusive session file lock PHP holds for the whole request by
+     * default. Every route but login/logout only ever READS $_SESSION, so there's
+     * no reason to keep holding that lock for a request's entire lifetime — and a
+     * slow one (a many-GB file download/upload streaming for minutes) used to
+     * block every OTHER concurrent request from the same logged-in browser
+     * (several chunk-upload requests in flight at once, or just a second tab)
+     * behind it, silently serializing them regardless of how parallel the client
+     * side tried to be.
+     */
+    public static function releaseSessionLock(): void
+    {
+        session_write_close();
+    }
+
     public static function login(array $userRow): void
     {
+        // The bootstrap already released the lock for this request (see
+        // releaseSessionLock) — reacquire it just long enough to write.
+        session_start();
         session_regenerate_id(true);
         $_SESSION['user_id'] = $userRow['id'];
         $_SESSION['role'] = $userRow['role'];
+        session_write_close();
     }
 
     public static function loginShareLink(string $sharedLinkId): void
@@ -75,6 +94,7 @@ final class Auth
 
     public static function logout(): void
     {
+        session_start();
         $_SESSION = [];
         if (ini_get('session.use_cookies')) {
             $params = session_get_cookie_params();
