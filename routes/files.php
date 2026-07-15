@@ -152,7 +152,13 @@ function files_download(array $params): void
     $totalSize = (int) $file['size_bytes'];
     header('Accept-Ranges: bytes');
     header('Content-Type: ' . ($file['mime_type'] ?: 'application/octet-stream'));
-    header('Content-Disposition: attachment; filename="' . str_replace('"', '', $file['name']) . '"');
+    // "attachment" makes a browser prompt/save the file for a real download — but
+    // that's also what makes an <iframe> pointed at this same URL trigger a
+    // download instead of actually rendering the PDF inline. The preview modal
+    // requests ?inline=1 for exactly that reason; a real download link never
+    // sets it, so normal downloads are unaffected.
+    $disposition = (isset($_GET['inline']) && $_GET['inline'] === '1') ? 'inline' : 'attachment';
+    header('Content-Disposition: ' . $disposition . '; filename="' . str_replace('"', '', $file['name']) . '"');
 
     // Honor Range requests so a dropped connection resumes the rest of a huge file
     // instead of restarting it from byte zero — this is what makes browsers'
