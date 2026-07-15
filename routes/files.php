@@ -356,10 +356,22 @@ function files_download_stats(array $params): void
     Response::json(['files' => $result]);
 }
 
+/** Zeroes every file's and folder's download_count — the frontend gates this
+    behind its own confirmation prompt, same as the audit-log clear button. */
+function files_download_stats_reset(array $params): void
+{
+    $actor = Auth::requireRole('ADMIN');
+    Db::execute('UPDATE files SET download_count = 0');
+    Db::execute('UPDATE folders SET download_count = 0');
+    AuditLogger::log($actor['id'], $actor['name'], $actor['role'], 'PERMISSION_CHANGE', 'İndirme istatistikleri sıfırlandı.');
+    Response::json(['ok' => true]);
+}
+
 return [
     ['GET', '#^/files$#', 'files_list'],
     ['POST', '#^/files$#', 'files_create'],
     ['GET', '#^/files/download-stats$#', 'files_download_stats'],
+    ['DELETE', '#^/files/download-stats$#', 'files_download_stats_reset'],
     ['GET', '#^/files/(?P<id>[a-zA-Z0-9_]+)/download$#', 'files_download'],
     ['GET', '#^/files/(?P<id>[a-zA-Z0-9_]+)/thumbnail$#', 'files_thumbnail'],
     ['PUT', '#^/files/(?P<id>[a-zA-Z0-9_]+)$#', 'files_update'],
