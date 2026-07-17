@@ -194,6 +194,52 @@ it; don't assume frontend changes are backed up anywhere until then.
   `App.tsx`), same on mobile and desktop. `RoleSelector` itself still renders,
   unchanged, for real customer/consumer logins — they have no sidebar
   equivalent, so removing it there would remove their only way to log out.
+- **Collage backgrounds have 12 fixed size/depth slots, not a compact list.**
+  `background_collage_images.sort_order` is reused as a **slot index** (0-11,
+  smallest/frontmost to largest/backmost), not an upload-order counter —
+  `(background_settings_id, sort_order)` has a `UNIQUE KEY` so re-uploading
+  into an already-filled slot deletes the old Drive file + row and inserts the
+  new one at the *same* slot (`background_settings_add_collage`), rather than
+  appending. `background_settings_serialize` always returns a sparse
+  12-element `collageImages` array (`null` for an empty slot) built from
+  whichever `sort_order` values actually have rows — the frontend renders all
+  12 slots every time, so a photo's slot index alone determines its size and
+  mouse-parallax sensitivity, regardless of when it was uploaded. Every other
+  collage knob (`collage_colors` as a comma-joined hex list, `collage_min/max_
+  size`, `collage_min/max_sensitivity`, `collage_scale`, `collage_spread`,
+  `collage_headline_*`) is a plain nullable column on `background_settings`
+  itself, deliberately not JSON (matches this schema's existing no-JSON-column
+  convention) — all default to sensible values in `background_settings_
+  serialize` when `NULL`, so a collage created before a given knob existed
+  still renders reasonably. `CollageBackground.tsx`'s own placement logic:
+  each slot's depth `i/(11)` interpolates size (`collageMinSize`↔`collage
+  MaxSize`, further scaled by `collageScale`%) and parallax sensitivity
+  (`collageMaxSensitivity`↔`collageMinSensitivity`) in one continuous
+  gradient instead of two discrete buckets. Positions blend two independently
+  adjustable knobs: `collageDistribution` (0=symmetric hand-placed anchors,
+  100=collision-avoided random placement in real pixel space, computed via
+  rejection sampling so large/backmost photos never pile on top of each
+  other and steer clear of the dead-center headline) and `collageSpread`
+  (0=every position collapses toward dead-center, deliberately allowing
+  overlap, 100=the original edge-biased spread) — both interpolate via the
+  same `lerp`, and are orthogonal to each other.
+- **Tüketici (consumer) share links can optionally be read-only-browsable**
+  (`shared_links.allow_preview`, only ever meaningful when `view_mode =
+  'consumer'`): unlike a `'customer'` view-mode link (which grants real
+  edit rights — rename/move/delete/share — via `actsAsCustomer` in
+  `DriveInterface.tsx`), `allowPreview` only upgrades the flat download list
+  to a folder-navigable, file-previewable view with **zero** edit rights.
+  `shared_links_collect_content` already recursively collects every
+  descendant folder/file for *any* link regardless of view mode, so no
+  backend data-fetching change was needed for this — it's purely a frontend
+  routing decision (`App.tsx`'s `showsBrowsablePanel` extends
+  `showsCustomerPanel`'s condition, but `actsAsCustomer` deliberately does
+  **not**, since `viewMode` stays `'consumer'`). The read-only sidebar (Layout
+  B) still needed explicit `showsCustomerPanel`-gating in a few spots that
+  aren't inside `DriveInterface` itself and so don't get its automatic
+  `isStaff`/`actsAsCustomer` protection for free: the Çöp Sepeti chip and the
+  floating bulk-action bar's "Paylaş" button both would have leaked to a
+  read-only preview visitor otherwise.
 - **Turkish-text search correctness** (`src/lib/text.ts`, `trLower()`): plain
   `.toLowerCase()` gets Turkish wrong in two independent, easy-to-miss ways —
   don't use it for any search/filter comparison in this codebase. (1) Casing:
@@ -499,3 +545,68 @@ it; don't assume frontend changes are backed up anywhere until then.
     deliberate, discussed tradeoff, not an oversight — don't "fix" it by
     flipping visibility without asking first, since doing so could break the
     existing cPanel pull flow (would need an SSH deploy key set up instead).
+
+20. **`pointer-events: none` on a component's own root div doesn't help if an
+    *ancestor* wrapper still defaults to `auto`.** `BackgroundCta`'s "cursor"
+    style used to attach its own mousemove listener to a full-cover
+    `pointer-events-auto` div — which silently ate every mouse move meant for
+    the collage's own photos underneath, freezing their parallax any time a
+    CTA was enabled. First fix attempt (making `BackgroundCta`'s own root
+    `pointer-events-none`, tracking the mouse via a `window`-level listener
+    instead so hit-testing doesn't matter for *tracking*) verifiably fixed the
+    tag itself (confirmed by reading its computed position at three different
+    mouse coordinates) but the photos **still** didn't move — because
+    `App.tsx` wraps `<BackgroundCta>` in its own `<div className="absolute
+    inset-0 z-[5]">`, which has no pointer-events class of its own and so
+    defaults to `auto`, still intercepting the hit-test one level up. Real fix
+    needed `pointer-events-none` on *that* wrapper too. Lesson: when tracing a
+    "some other element is eating my pointer events" bug, check
+    `document.elementFromPoint(x, y)` (or the full ancestor chain's computed
+    `pointer-events`) rather than assuming the fix is complete once the
+    component you edited looks right in isolation — every ancestor between
+    the suspected blocker and the real DOM root needs the same treatment.
+
+21. **A debounced-save UI with several independently-editable fields on the
+    same record needs its "merge the server's response back into local
+    state" step to read from a ref, not a render-closured variable.** The
+    collage settings section added ~10 simultaneously-tunable fields (colors,
+    distribution, headline text/font/color/size, sensitivity/size ranges,
+    scale, spread) to `SettingsModal.tsx`, each with its own per-field
+    debounce timer (`handleUpdateBackground`). Two of those debounces landing
+    within the same ~500ms window is now the normal case, not an edge case —
+    and `replaceInPool`'s original implementation rebuilt the pool from
+    whatever `localPool` its enclosing render had closed over, so whichever
+    response arrived *second* would silently overwrite the *first* field's
+    just-saved value with a stale pre-edit snapshot. Fixed by keeping a
+    `localPoolRef` updated synchronously on every optimistic edit and reading
+    from `.current` inside `replaceInPool`, instead of the closured
+    `localPool` — verified by editing the headline text, waiting for its save
+    to land, then immediately dragging an unrelated slider, and confirming
+    the headline text was still there afterward.
+
+22. **An async "add a new card" button needs a busy-guard, or a fast
+    double-click (or even a single Playwright `.click()` retried while a
+    modal is still animating in) can create two.** `handleAddCollage` had no
+    protection against firing twice; real repeated test runs occasionally
+    produced two identical "Kolaj" background rows from what looked like one
+    click. Fixed with a simple `addingCollage` state disabling the button
+    (and swapping its icon for a spinner) until the create request resolves —
+    the same pattern should be applied to `handleAddMedia`/`handleAddSlider`
+    if this class of bug ever shows up there too, they were not touched this
+    time since it hadn't actually been observed on them.
+
+23. **Deploy order matters for a new column too, not just a new ENUM value**
+    (see #18) — `collage_scale`/`collage_spread` shipped in code before the
+    corresponding `ALTER TABLE` had actually been run against production.
+    Symptom was subtle and easy to misdiagnose: the Settings modal's own live
+    preview looked completely correct (it renders from local React state,
+    updated optimistically *before* the save request even completes), while a
+    real customer opening the panel in a separate tab/device saw the old
+    values, because the `PUT` that was supposed to persist the change failed
+    silently against the missing columns (`.catch(() => {})` in
+    `handleUpdateBackground` swallows the error) and the server never had
+    anything new to serve. Lesson for next time a symptom is phrased as
+    "works in the editor/preview but not for the real visitor": suspect a
+    missing migration on the specific fields involved before anything else —
+    it produces exactly this "looks fine to me, broken for everyone else"
+    shape of bug.
