@@ -175,6 +175,8 @@ CREATE TABLE IF NOT EXISTS background_settings (
   collage_max_size          SMALLINT UNSIGNED NULL,
   collage_min_sensitivity   TINYINT UNSIGNED NULL,
   collage_max_sensitivity   TINYINT UNSIGNED NULL,
+  collage_scale             SMALLINT UNSIGNED NULL,
+  collage_spread            TINYINT UNSIGNED NULL,
   collage_headline_text     VARCHAR(500) NULL,
   collage_headline_font     VARCHAR(200) NULL,
   collage_headline_color    VARCHAR(20) NULL,

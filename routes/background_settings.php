@@ -62,6 +62,8 @@ function background_settings_serialize(array $row): array
         'collageMaxSize' => $row['collage_max_size'] !== null ? (int) $row['collage_max_size'] : 150,
         'collageMinSensitivity' => $row['collage_min_sensitivity'] !== null ? (int) $row['collage_min_sensitivity'] : 5,
         'collageMaxSensitivity' => $row['collage_max_sensitivity'] !== null ? (int) $row['collage_max_sensitivity'] : 85,
+        'collageScale' => $row['collage_scale'] !== null ? (int) $row['collage_scale'] : 100,
+        'collageSpread' => $row['collage_spread'] !== null ? (int) $row['collage_spread'] : 65,
         'collageHeadlineText' => $row['collage_headline_text'] ?? '',
         'collageHeadlineFont' => $row['collage_headline_font'] ?: "'Iowan Old Style','Palatino Linotype',Georgia,serif",
         'collageHeadlineColor' => $row['collage_headline_color'] ?: '#1c1f2a',
@@ -191,6 +193,14 @@ function background_settings_update(array $params): void
     if (array_key_exists('collageMaxSensitivity', $body)) {
         $fields[] = 'collage_max_sensitivity = ?';
         $values[] = max(0, min(100, (int) $body['collageMaxSensitivity']));
+    }
+    if (array_key_exists('collageScale', $body)) {
+        $fields[] = 'collage_scale = ?';
+        $values[] = max(25, min(400, (int) $body['collageScale']));
+    }
+    if (array_key_exists('collageSpread', $body)) {
+        $fields[] = 'collage_spread = ?';
+        $values[] = max(0, min(100, (int) $body['collageSpread']));
     }
     if (array_key_exists('collageHeadlineText', $body)) {
         $fields[] = 'collage_headline_text = ?';
