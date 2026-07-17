@@ -148,6 +148,26 @@ function users_update(array $params): void
     $values[] = $id;
     Db::execute('UPDATE users SET ' . implode(', ', $fields) . ' WHERE id = ?', $values);
     AuditLogger::log($actor['id'], $actor['name'], $actor['role'], 'PERMISSION_CHANGE', "Kullanıcı güncellendi: {$target['name']}");
+
+    // A customer's root folder is originally named after them at creation time
+    // (users_create) — renaming the customer alone would otherwise leave that
+    // folder's name (and therefore every breadcrumb/path built from it) stuck on
+    // the old name forever, since folders.name is never re-derived from users.name.
+    if (array_key_exists('name', $body) && $target['role'] === 'CUSTOMER' && $target['folder_id'] !== null) {
+        $newName = trim((string) $body['name']);
+        if ($newName !== '') {
+            Db::execute('UPDATE folders SET name = ? WHERE id = ?', [$newName, $target['folder_id']]);
+            try {
+                $folder = Db::queryOne('SELECT drive_folder_id FROM folders WHERE id = ?', [$target['folder_id']]);
+                if ($folder !== null && $folder['drive_folder_id'] !== null) {
+                    GoogleDriveClient::renameFile($folder['drive_folder_id'], $newName);
+                }
+            } catch (Throwable $e) {
+                error_log('Drive klasor adi guncelleme basarisiz (musteri): ' . $e->getMessage());
+            }
+        }
+    }
+
     Response::json(['ok' => true]);
 }
 

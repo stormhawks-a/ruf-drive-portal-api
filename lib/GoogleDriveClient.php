@@ -250,6 +250,15 @@ final class GoogleDriveClient
         return $result['id'];
     }
 
+    /** Renames a Drive file or folder in place — a plain field PATCH, no
+        add/removeParents involved, so it never affects the item's location. */
+    public static function renameFile(string $fileId, string $newName): void
+    {
+        self::request('PATCH', self::API_BASE . '/files/' . urlencode($fileId), [
+            'name' => $newName,
+        ]);
+    }
+
     /** Fetches a Drive file's byte size — needed to build a correct Content-Range
         header when serving Range requests for files whose size isn't already
         cached locally (e.g. background videos, which have no size_bytes column). */
