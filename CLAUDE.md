@@ -154,6 +154,46 @@ it; don't assume frontend changes are backed up anywhere until then.
   thumbnail (that function takes an optional size now specifically so this
   fallback and the tiny list-view row can each ask for their own icon size
   instead of duplicating the type→icon→color mapping).
+- **Move and recursive copy** (`files_update`/`folders_update` accept an
+  optional `parentId`; `files_copy`/`folders_copy` are separate endpoints):
+  both mirror the change to real Drive (`GoogleDriveClient::moveFile`/
+  `copyFile`), never just the DB row. Copy is a genuinely independent
+  duplicate — a real `files.copy` Drive API call per file, a real
+  `files.create` folder per subfolder — never a second DB row pointing at the
+  same `drive_file_id`, so deleting one copy can never affect the other.
+  `folders_copy_subtree` recurses the whole tree top-down (parent created
+  before its children, so each child copy has a real new Drive parent to
+  land in) and accumulates every created row into `&$createdFolders`/
+  `&$createdFiles` by reference, because unlike a move, the frontend has no
+  local copy of any of these brand-new rows to optimistically patch — the
+  whole batch comes back in one response instead. Both move and copy reject
+  (422) moving/copying a folder into itself or its own descendant
+  (`folders_collect_descendant_ids` cycle check) — without it the destination
+  becomes part of the subtree still being walked, recursing forever.
+- **Sort (date/name/size/type) is entirely client-side** (`DriveInterface.tsx`,
+  `sortBy` state) — never sent to the server, since the whole folder/file list
+  for a view is already loaded. Folders and files are sorted independently
+  (`sortFolders`/`sortFiles`) and folders always render in their own section
+  above files regardless of `sortBy`, structurally, not by sort order — a
+  folder has no meaningful "type" of its own, so `sortBy === "type"` falls
+  back to name for folders specifically, on purpose.
+- **Right-click context menus are two different menus, not one**, both driven
+  by the same empty-space-vs-card hit-test (`target.closest("[data-select-id],
+  button, input, a")`) also used by drag-to-select: right-clicking a card
+  opens the per-item menu (rename/move/copy/download/delete, plus bulk actions
+  when the card is part of an active multi-selection); right-clicking
+  anywhere else opens the Sırala/Yeni Klasör menu. Dragging a card onto a
+  folder (native HTML5 DnD, custom `application/x-ruf-move` dataTransfer type
+  so it's never confused with a real OS file drop) moves it the same way the
+  "Taşı..." menu item does — `handleDragOver`/`handleDrop` on the container
+  ignore anything carrying that MIME type so the "Dosyaları Buraya Bırakın"
+  upload overlay never flashes during an internal drag.
+- **The bottom `RoleSelector` bar is gone entirely for staff** (ADMIN/EDITOR)
+  — İndirme İstatistikleri/İşlem Logları/Çöp Sepeti/Arkaplan Ayarları/Çıkış
+  Yap now live as one stacked column in the left sidebar (`sidebarNav` in
+  `App.tsx`), same on mobile and desktop. `RoleSelector` itself still renders,
+  unchanged, for real customer/consumer logins — they have no sidebar
+  equivalent, so removing it there would remove their only way to log out.
 - **Turkish-text search correctness** (`src/lib/text.ts`, `trLower()`): plain
   `.toLowerCase()` gets Turkish wrong in two independent, easy-to-miss ways —
   don't use it for any search/filter comparison in this codebase. (1) Casing:
@@ -410,3 +450,52 @@ it; don't assume frontend changes are backed up anywhere until then.
     ("uploads are slow") but need completely different fixes, and this
     session burned real time initially misattributing this one to Drive's
     API instead of the hosting account's inbound path).
+
+16. **Safari's `<video>` needs a real Range/206 response to play at all** —
+    Chrome/Firefox tolerate a single 200-with-the-whole-body response, Safari
+    doesn't and just shows a blank/broken player. `files_download` already
+    forwarded `Range` correctly; `background_settings_stream_media` (the route
+    that actually serves uploaded background videos) didn't, so background
+    videos silently failed only in Safari while looking completely fine
+    everywhere else. Fixed by giving it the same `files_parse_range_header`ed
+    206 path, using `GoogleDriveClient::getFileSize` for the `Content-Range`
+    total (background rows have no cached `size_bytes` column). Any future
+    route that streams bytes to a `<video>`/`<audio>` tag needs this same
+    treatment, not just images.
+
+17. **`GoogleDriveClient`'s generic `request()` had no cURL timeout at all** —
+    found while testing locally with a stale/expired OAuth token: every Drive
+    metadata call (create/delete/move/copy/getFileSize) hung until the
+    connection eventually dropped on its own, and because the local dev
+    server (`php -S`, single-threaded) processes one request at a time, that
+    one hang blocked every other request behind it, including completely
+    unrelated ones. The same failure mode applies to real PHP-FPM workers in
+    production — a hung Drive call just ties up a worker forever instead of
+    failing fast. Fixed with `CURLOPT_CONNECTTIMEOUT => 10` /
+    `CURLOPT_TIMEOUT => 30` on that one method (it's only ever used for small
+    metadata calls, never big transfers, so 30s is always generous — don't
+    add this same blanket timeout to `streamFileTo`, which legitimately needs
+    to run long for a big file).
+
+18. **Deploy order matters when a change adds new `audit_logs.action` ENUM
+    values.** Every move/copy/etc. handler calls `AuditLogger::log()` near
+    the end, unguarded by try/catch — if the ENUM doesn't yet contain the
+    value being inserted (e.g. `FILE_MOVE` before the migration below has
+    run), that call throws, the request 500s, and the response looks like a
+    total failure to the frontend even though the actual DB mutation (the
+    file's new `parent_id`, etc.) already committed a few lines earlier with
+    no transaction wrapping it — a confusing half-succeeded state. Always run
+    the `ALTER TABLE audit_logs MODIFY action ENUM(...)` migration in
+    phpMyAdmin *before* deploying backend code that logs a new action value,
+    never after.
+
+19. **This repo (`stormhawks-a/ruf-drive-portal-api`) is a public GitHub
+    repository, on purpose** — chosen specifically so cPanel's Git™ Version
+    Control could pull it over plain HTTPS without setting up an SSH deploy
+    key. `config.php` (DB creds, `app_secret`, Google OAuth client secret) is
+    `.gitignore`'d and never touched this repo, so nothing directly
+    sensitive is exposed — but the actual business logic (Drive integration,
+    role/permission boundaries, DB schema) is fully public. This was a
+    deliberate, discussed tradeoff, not an oversight — don't "fix" it by
+    flipping visibility without asking first, since doing so could break the
+    existing cPanel pull flow (would need an SSH deploy key set up instead).
