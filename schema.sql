@@ -102,6 +102,11 @@ CREATE TABLE IF NOT EXISTS shared_links (
   -- musterinin "kalici" paylasim linkidir (Paylas butonundan üretilen/yenilenen).
   view_mode        ENUM('consumer','customer') NOT NULL DEFAULT 'consumer',
   customer_user_id VARCHAR(40)  NULL,
+  -- Only meaningful when view_mode='consumer': upgrades the flat download list to
+  -- a browsable, read-only preview (folder navigation + photo/video preview), with
+  -- no edit rights at all — unlike view_mode='customer' this never grants
+  -- rename/move/delete/share.
+  allow_preview    TINYINT(1)   NOT NULL DEFAULT 0,
   CONSTRAINT fk_links_creator FOREIGN KEY (created_by_id) REFERENCES users(id),
   CONSTRAINT fk_links_customer FOREIGN KEY (customer_user_id) REFERENCES users(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -162,16 +167,34 @@ CREATE TABLE IF NOT EXISTS background_settings (
   cta_label       VARCHAR(100) NULL,
   cta_url         VARCHAR(500) NULL,
   sort_order      INT NOT NULL DEFAULT 0,
+  -- Kolaj (type='collage') tipine ozel ayarlar; diger tipler icin hep NULL kalir.
+  -- collage_colors: virgulle ayrilmis 2-6 hex renk ("#rrggbb,#rrggbb,...").
+  collage_colors            VARCHAR(120) NULL,
+  collage_distribution      TINYINT UNSIGNED NULL,
+  collage_min_size          SMALLINT UNSIGNED NULL,
+  collage_max_size          SMALLINT UNSIGNED NULL,
+  collage_min_sensitivity   TINYINT UNSIGNED NULL,
+  collage_max_sensitivity   TINYINT UNSIGNED NULL,
+  collage_headline_text     VARCHAR(500) NULL,
+  collage_headline_font     VARCHAR(200) NULL,
+  collage_headline_color    VARCHAR(20) NULL,
+  collage_headline_size     SMALLINT UNSIGNED NULL,
   created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- sort_order burada "slot_index" (0-11) olarak kullanilir: kolajin sabit 12
+-- yuvasindan hangisine dustugunu belirler, sadece ekleme sirasini degil. Bir
+-- yuvaya yeniden yukleme yapmak eski satiri silip ayni sort_order ile yenisini
+-- eklemek seklinde calisir (bkz. background_settings_add_collage), bu yuzden
+-- (background_settings_id, sort_order) her zaman benzersizdir.
 CREATE TABLE IF NOT EXISTS background_collage_images (
   id                     BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   background_settings_id VARCHAR(40) NOT NULL,
   drive_file_id          VARCHAR(120) NOT NULL,
   mime_type              VARCHAR(100) NULL,
   sort_order             TINYINT UNSIGNED NOT NULL DEFAULT 0,
-  CONSTRAINT fk_collage_bg FOREIGN KEY (background_settings_id) REFERENCES background_settings(id) ON DELETE CASCADE
+  CONSTRAINT fk_collage_bg FOREIGN KEY (background_settings_id) REFERENCES background_settings(id) ON DELETE CASCADE,
+  UNIQUE KEY uq_collage_slot (background_settings_id, sort_order)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ---------------------------------------------------------------------------

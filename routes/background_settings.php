@@ -26,14 +26,27 @@ function background_settings_resolve_drive_folder(): ?string
     return $folderId;
 }
 
+// Fixed number of collage photo slots — smallest/frontmost (index 0) to
+// largest/backmost (index 11). A slot with no photo yet still "exists" (the
+// frontend always renders all 12), so collageImages is a sparse array with
+// nulls, not a compact list — index IS the slot, not just an upload order.
+const COLLAGE_SLOT_COUNT = 12;
+
 /** A background row plus its collage children, shaped for the frontend (media as our
     own streaming proxy urls — drive_file_id is never sent to the client). */
 function background_settings_serialize(array $row): array
 {
     $collageRows = Db::query(
-        'SELECT * FROM background_collage_images WHERE background_settings_id = ? ORDER BY sort_order ASC, id ASC',
+        'SELECT * FROM background_collage_images WHERE background_settings_id = ?',
         [$row['id']]
     );
+    $collageImages = array_fill(0, COLLAGE_SLOT_COUNT, null);
+    foreach ($collageRows as $c) {
+        $slot = (int) $c['sort_order'];
+        if ($slot >= 0 && $slot < COLLAGE_SLOT_COUNT) {
+            $collageImages[$slot] = "/background-settings/collage/{$c['id']}";
+        }
+    }
 
     return [
         'id' => $row['id'],
@@ -42,10 +55,17 @@ function background_settings_serialize(array $row): array
         'url1' => $row['drive_file_id_1'] ? "/background-settings/{$row['id']}/media/1" : '',
         'url2' => $row['drive_file_id_2'] ? "/background-settings/{$row['id']}/media/2" : '',
         'sliderPosition' => $row['slider_position'] !== null ? (int) $row['slider_position'] : null,
-        'collageImages' => array_map(
-            fn($c) => "/background-settings/collage/{$c['id']}",
-            $collageRows
-        ),
+        'collageImages' => $collageImages,
+        'collageColors' => $row['collage_colors'] ? explode(',', $row['collage_colors']) : ['#ffe4ec', '#dbeafe', '#fef9c3'],
+        'collageDistribution' => $row['collage_distribution'] !== null ? (int) $row['collage_distribution'] : 35,
+        'collageMinSize' => $row['collage_min_size'] !== null ? (int) $row['collage_min_size'] : 34,
+        'collageMaxSize' => $row['collage_max_size'] !== null ? (int) $row['collage_max_size'] : 150,
+        'collageMinSensitivity' => $row['collage_min_sensitivity'] !== null ? (int) $row['collage_min_sensitivity'] : 5,
+        'collageMaxSensitivity' => $row['collage_max_sensitivity'] !== null ? (int) $row['collage_max_sensitivity'] : 85,
+        'collageHeadlineText' => $row['collage_headline_text'] ?? '',
+        'collageHeadlineFont' => $row['collage_headline_font'] ?: "'Iowan Old Style','Palatino Linotype',Georgia,serif",
+        'collageHeadlineColor' => $row['collage_headline_color'] ?: '#1c1f2a',
+        'collageHeadlineSize' => $row['collage_headline_size'] !== null ? (int) $row['collage_headline_size'] : 36,
         'title' => $row['title'],
         'subtitle' => $row['subtitle'],
         'ctaEnabled' => (bool) $row['cta_enabled'],
@@ -137,6 +157,56 @@ function background_settings_update(array $params): void
     if (array_key_exists('sliderPosition', $body)) {
         $fields[] = 'slider_position = ?';
         $values[] = max(0, min(100, (int) $body['sliderPosition']));
+    }
+
+    // Kolaj-ozel ayarlar — sadece type='collage' icin anlamli ama herhangi bir
+    // arkaplan turunde gonderilse de zararsizdir (baska yerde hic okunmaz).
+    if (array_key_exists('collageColors', $body) && is_array($body['collageColors'])) {
+        $colors = array_values(array_filter(
+            $body['collageColors'],
+            fn($c) => is_string($c) && preg_match('/^#[0-9a-fA-F]{6}$/', $c)
+        ));
+        $colors = array_slice($colors, 0, 6);
+        if (count($colors) >= 2) {
+            $fields[] = 'collage_colors = ?';
+            $values[] = implode(',', $colors);
+        }
+    }
+    if (array_key_exists('collageDistribution', $body)) {
+        $fields[] = 'collage_distribution = ?';
+        $values[] = max(0, min(100, (int) $body['collageDistribution']));
+    }
+    if (array_key_exists('collageMinSize', $body)) {
+        $fields[] = 'collage_min_size = ?';
+        $values[] = max(10, min(300, (int) $body['collageMinSize']));
+    }
+    if (array_key_exists('collageMaxSize', $body)) {
+        $fields[] = 'collage_max_size = ?';
+        $values[] = max(10, min(700, (int) $body['collageMaxSize']));
+    }
+    if (array_key_exists('collageMinSensitivity', $body)) {
+        $fields[] = 'collage_min_sensitivity = ?';
+        $values[] = max(0, min(100, (int) $body['collageMinSensitivity']));
+    }
+    if (array_key_exists('collageMaxSensitivity', $body)) {
+        $fields[] = 'collage_max_sensitivity = ?';
+        $values[] = max(0, min(100, (int) $body['collageMaxSensitivity']));
+    }
+    if (array_key_exists('collageHeadlineText', $body)) {
+        $fields[] = 'collage_headline_text = ?';
+        $values[] = (string) $body['collageHeadlineText'];
+    }
+    if (array_key_exists('collageHeadlineFont', $body)) {
+        $fields[] = 'collage_headline_font = ?';
+        $values[] = (string) $body['collageHeadlineFont'];
+    }
+    if (array_key_exists('collageHeadlineColor', $body) && preg_match('/^#[0-9a-fA-F]{6}$/', (string) $body['collageHeadlineColor'])) {
+        $fields[] = 'collage_headline_color = ?';
+        $values[] = $body['collageHeadlineColor'];
+    }
+    if (array_key_exists('collageHeadlineSize', $body)) {
+        $fields[] = 'collage_headline_size = ?';
+        $values[] = max(10, min(120, (int) $body['collageHeadlineSize']));
     }
 
     if (empty($fields)) {
@@ -242,6 +312,10 @@ function background_settings_upload_media(array $params): void
     Response::json(['background' => background_settings_serialize($updated)]);
 }
 
+/** Uploads into one specific fixed slot (0-11, smallest/front to largest/back) —
+    not an append. Uploading again into an already-filled slot replaces whatever
+    was there (old Drive file deleted), rather than adding a new photo, since the
+    slot IS the identity here, not an auto-incrementing position. */
 function background_settings_add_collage(array $params): void
 {
     Auth::requireRole('ADMIN');
@@ -251,18 +325,29 @@ function background_settings_add_collage(array $params): void
         Response::error('Arkaplan bulunamadı.', 404);
     }
 
-    $existingCount = Db::queryOne('SELECT COUNT(*) as c FROM background_collage_images WHERE background_settings_id = ?', [$id]);
-    if ((int) $existingCount['c'] >= 10) {
-        Response::error('En fazla 10 fotoğraf eklenebilir.', 422);
+    $slotIndex = isset($_POST['slotIndex']) ? (int) $_POST['slotIndex'] : -1;
+    if ($slotIndex < 0 || $slotIndex >= COLLAGE_SLOT_COUNT) {
+        Response::error('Geçersiz fotoğraf yuvası.', 422);
     }
 
     $upload = background_settings_store_upload();
-    $maxSort = Db::queryOne('SELECT MAX(sort_order) as m FROM background_collage_images WHERE background_settings_id = ?', [$id]);
-    $sortOrder = ((int) ($maxSort['m'] ?? -1)) + 1;
+
+    $existing = Db::queryOne(
+        'SELECT * FROM background_collage_images WHERE background_settings_id = ? AND sort_order = ?',
+        [$id, $slotIndex]
+    );
+    if ($existing !== null) {
+        try {
+            GoogleDriveClient::deleteFile($existing['drive_file_id']);
+        } catch (Throwable $e) {
+            error_log('Eski kolaj gorseli Drive\'dan silinemedi: ' . $e->getMessage());
+        }
+        Db::execute('DELETE FROM background_collage_images WHERE id = ?', [$existing['id']]);
+    }
 
     Db::execute(
         'INSERT INTO background_collage_images (background_settings_id, drive_file_id, mime_type, sort_order) VALUES (?, ?, ?, ?)',
-        [$id, $upload['driveFileId'], $upload['mimeType'], $sortOrder]
+        [$id, $upload['driveFileId'], $upload['mimeType'], $slotIndex]
     );
 
     $updated = Db::queryOne('SELECT * FROM background_settings WHERE id = ?', [$id]);

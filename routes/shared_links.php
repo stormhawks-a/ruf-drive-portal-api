@@ -62,6 +62,7 @@ function shared_links_serialize(array $link, bool $unlocked, bool $includePasswo
         'customerId' => $link['customer_user_id'],
         'fileIds' => array_values($fileIds),
         'folderIds' => array_values($folderIds),
+        'allowPreview' => (bool) $link['allow_preview'],
     ];
     if ($includePassword) {
         $result['currentPassword'] = $link['password_encrypted'] !== null ? Crypto::decrypt($link['password_encrypted']) : null;
@@ -214,19 +215,24 @@ function shared_links_create(array $params): void
                 Response::error('Müşteri bulunamadı.', 404);
             }
         }
+        // Only ever meaningful for a "Tüketici" link — a "Müşteri" link already
+        // grants full browsing (and more, real edit rights), so this flag would be
+        // redundant there.
+        $allowPreview = $viewMode === 'consumer' && !empty($body['allowPreview']);
     } else {
         $viewMode = 'consumer';
         $customerId = null;
+        $allowPreview = false;
     }
 
     $id = Ids::generate('link');
     Db::execute(
-        'INSERT INTO shared_links (id, name, created_by_id, recipient_name, password_hash, password_encrypted, expires_at, view_mode, customer_user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO shared_links (id, name, created_by_id, recipient_name, password_hash, password_encrypted, expires_at, view_mode, customer_user_id, allow_preview) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [
             $id, $name, $user['id'], $recipientName,
             $password !== null ? Auth::hash($password) : null,
             $password !== null ? Crypto::encrypt($password) : null,
-            $expiresAt, $viewMode, $customerId,
+            $expiresAt, $viewMode, $customerId, $allowPreview ? 1 : 0,
         ]
     );
     foreach ($fileIds as $fid) {
