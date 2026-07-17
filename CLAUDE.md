@@ -106,6 +106,54 @@ it; don't assume frontend changes are backed up anywhere until then.
   Drive's own `alt=media` endpoint, which honors it natively — this is what
   lets a browser's built-in "resume interrupted download" actually work,
   responding `206 Partial Content` with the right `Content-Range`.
+- **Download-count stats** (`files.download_count`, `folders.download_count`,
+  `GET/DELETE /files/download-stats`, admin-only): a folder download must
+  count as **one** row, never one row per file inside it, no matter which of
+  the two completely different download paths produced it. `zip_download`
+  (Safari/Firefox, or an explicit ZIP request) increments `files.download_count`
+  only for individually-picked file ids (`zip_collect_entries`'s
+  `directFileIds`) and `folders.download_count` once per requested folder id
+  (`processedFolderIds`) — files swept in recursively from inside a folder
+  never bump their own count. The **other** download path — Chrome/Edge's
+  native "real folder structure" write via `showDirectoryPicker`
+  (`src/lib/folderDownload.ts`) — fetches every file individually through
+  `files_download`, so those requests pass `?skipCount=1` and the frontend
+  separately calls `POST /folders/{id}/register-download` once per top-level
+  folder instead. Forgetting either path's special-case makes the stats panel
+  explode into dozens of rows the moment someone downloads a folder that way.
+  Range-request continuations (a resumed/seeked download re-hitting
+  `files_download`) are also excluded from counting (`$isContinuation` check)
+  for the same reason — one logical download must stay one count regardless
+  of how many HTTP requests it took.
+- **Editors can manage CUSTOMER accounts, never ADMIN/EDITOR ones.**
+  `users_create/update/delete` accept `EDITOR` now (previously ADMIN-only,
+  which silently 403'd the "Yeni Müşteri Ekle" button the frontend already
+  showed editors), but every one of those three checks
+  `$actor['role'] === 'EDITOR' && target/body role !== 'CUSTOMER'` and 403s —
+  an editor can never create, edit, or delete a staff account, including
+  their own.
+- **PDF preview needed `Content-Disposition: inline`, not `attachment`.**
+  `files_download` always forced `attachment` (correct for a real download —
+  it's what makes the browser show a save dialog), but that also makes an
+  `<iframe>` pointed at the same URL trigger a download prompt instead of
+  rendering the file. `?inline=1` (`filesApi.previewUrl()`) switches the
+  header for that one case; the PDF `<iframe>` in `PreviewModal.tsx` also
+  appends `#toolbar=0&navpanes=0` to hide the browser's own PDF-viewer chrome
+  (print/download/annotate toolbar), which otherwise reads as stray buttons
+  that have nothing to do with this app.
+- **Folder card previews fall back to file-type icons, recursively.** When a
+  folder has no direct image children, `getFolderPreviewFallback` (in
+  `DriveInterface.tsx`) walks the **entire subtree** (not just direct
+  children) looking for the first non-empty type in priority order (video >
+  pdf > audio > sheet > doc > other), and only falls back to a plain folder
+  icon if there's truly no file anywhere below it — a folder containing only
+  subfolders full of videos still shows video icons, not a meaningless
+  generic folder glyph. Rendered as the same "big tile in front, second tile
+  peeking out behind it, count badge" stack the image-thumbnail preview
+  already used, just with `getFileIcon(type, sizeClass)` standing in for a
+  thumbnail (that function takes an optional size now specifically so this
+  fallback and the tiny list-view row can each ask for their own icon size
+  instead of duplicating the type→icon→color mapping).
 - **Turkish-text search correctness** (`src/lib/text.ts`, `trLower()`): plain
   `.toLowerCase()` gets Turkish wrong in two independent, easy-to-miss ways —
   don't use it for any search/filter comparison in this codebase. (1) Casing:
@@ -303,3 +351,62 @@ it; don't assume frontend changes are backed up anywhere until then.
       before queueing, in `executeUploadBatch` (`DriveInterface.tsx`) — the
       one choke point every upload path (drag-drop, file picker, folder
       picker) already funnels through.
+
+13. **PHP's default session handling serializes every concurrent request from
+    the same logged-in browser, silently.** `session_start()` holds an
+    exclusive file lock on the session for the *entire* request, and nothing
+    was ever releasing it — so several chunk-upload requests fired in
+    parallel from one session (or just two browser tabs open at once) queued
+    up behind each other at the PHP level no matter how parallel the client
+    side tried to be, with zero error or log entry to point at. Proved it with
+    an isolated before/after timing script (two 1.5s-sleep requests: ~3s
+    serialized vs ~1.5s once the lock was released) before touching any real
+    code. Fixed by calling `Auth::releaseSessionLock()`
+    (`session_write_close()`) right after `Auth::startSession()` in
+    `bootstrap.php`, for every route — `Auth::login()`/`Auth::logout()` are
+    the only two places that ever write `$_SESSION`, so they briefly
+    `session_start()` again just to write, then close. Any future route that
+    needs to *write* `$_SESSION` mid-request must do the same
+    reopen-just-to-write dance, or it'll silently fail to persist (the
+    in-memory `$_SESSION` array itself isn't cleared by `session_write_close`,
+    only saved-and-unlocked, so reads still work fine without reopening —
+    it's specifically writes elsewhere that need this).
+
+14. **Concurrent file uploads help, but push the count/chunk-size up ONE step
+    at a time and test with a real multi-file upload after each change** —
+    don't jump straight to a high number. `CONCURRENT_UPLOAD_LIMIT`
+    (`App.tsx`, `handleAddBatch`) briefly went to 6 with `UPLOAD_CHUNK_BYTES`
+    (`src/api.ts`) at 32MB; in production this made real uploads grind to a
+    near-halt (other, lighter site requests kept working fine, so it wasn't
+    full PHP-FPM worker exhaustion — more likely several 32MB chunk buffers
+    plus their own relay-to-Drive CPU/SSL overhead, all at once, starving each
+    other on a modest shared VM). Rolled both back to 2 / 16MB. Both knobs
+    interact — don't tune one without re-testing the other.
+
+15. **The real upload bottleneck turned out to be neither Drive nor this
+    hosting account's outbound bandwidth — it's the browser→server leg
+    specifically**, and this took three separate controlled measurements to
+    pin down (don't skip straight to a fix based on only one data point next
+    time). `routes/diagnostics.php` (temporary, admin-only, delete once this
+    is resolved) has two tests: `diagnostics_upload_speed_test` times a raw
+    upload from *this server* straight to Drive (optionally N of them at once
+    via `curl_multi`, `?concurrent=N`, to tell "Drive throttles per
+    connection" apart from "the account's own outbound pipe is the cap");
+    `diagnostics_echo_upload` reads-and-discards whatever the browser sends,
+    isolating the browser→server hop with Drive completely out of the
+    picture. On this Natro account: browser→Drive directly ≈ 15MB/s,
+    server→Drive directly ≈ 16-27MB/s, but browser→this server ≈ 1.8-1.9MB/s
+    — both endpoints are independently fast, so the bottleneck is specifically
+    inbound bandwidth to this hosting account, most likely a network-level
+    throttle (mod_cband/CloudLinux I/O limit or similar), confirmed to be
+    unrelated to PHP config after Natro raised "PHP limits" and the number
+    didn't move (1.91 → 1.82MB/s). **Nothing in this codebase can fix an
+    inbound bandwidth cap** — nothing about a bigger chunk size, more
+    concurrent uploads, or Drive-side tuning bypasses it, since the ceiling is
+    on the hop before any of that code even runs. If this resurfaces, re-run
+    both diagnostics before touching upload code again instead of assuming
+    it's the same cause as gotcha #11 (that one was a timeout/retry storm,
+    not a raw bandwidth ceiling — the two look similar as user reports
+    ("uploads are slow") but need completely different fixes, and this
+    session burned real time initially misattributing this one to Drive's
+    API instead of the hosting account's inbound path).
