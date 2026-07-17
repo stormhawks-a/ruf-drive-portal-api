@@ -310,8 +310,33 @@ function background_settings_stream_media(array $params): void
         exit;
     }
 
+    @set_time_limit(0);
+    header('Accept-Ranges: bytes');
     header('Content-Type: ' . ($mimeType ?: 'application/octet-stream'));
     header('Cache-Control: private, max-age=3600');
+
+    // Safari's <video> element refuses to play at all unless the server answers
+    // Range requests with a real 206 — Chrome/Firefox tolerate a single 200 with
+    // the whole body, Safari doesn't. files_download already implements this
+    // (files_parse_range_header, loaded globally since index.php requires every
+    // routes/*.php file regardless of which one matches); reuse it here instead
+    // of duplicating the parsing logic.
+    $totalSize = GoogleDriveClient::getFileSize($driveFileId);
+    $range = files_parse_range_header($_SERVER['HTTP_RANGE'] ?? null, $totalSize);
+    if ($range !== null) {
+        [$start, $end] = $range;
+        http_response_code(206);
+        header("Content-Range: bytes {$start}-{$end}/{$totalSize}");
+        header('Content-Length: ' . ($end - $start + 1));
+        GoogleDriveClient::streamFileTo($driveFileId, function (string $chunk): void {
+            echo $chunk;
+        }, "bytes={$start}-{$end}");
+        exit;
+    }
+
+    if ($totalSize > 0) {
+        header('Content-Length: ' . $totalSize);
+    }
     GoogleDriveClient::streamFile($driveFileId);
     exit;
 }

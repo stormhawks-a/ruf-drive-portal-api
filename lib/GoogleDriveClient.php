@@ -225,6 +225,40 @@ final class GoogleDriveClient
         self::request('DELETE', self::API_BASE . '/files/' . urlencode($fileId));
     }
 
+    /** Re-parents a Drive file or folder — Drive tracks parents as an add/remove
+        pair rather than a plain field update. Moving a folder moves its whole
+        subtree automatically (Drive only tracks the folder's own parent, not
+        each descendant's), so callers never need to touch children themselves. */
+    public static function moveFile(string $fileId, ?string $oldParentId, string $newParentId): void
+    {
+        $url = self::API_BASE . '/files/' . urlencode($fileId) . '?addParents=' . urlencode($newParentId);
+        if ($oldParentId !== null) {
+            $url .= '&removeParents=' . urlencode($oldParentId);
+        }
+        self::request('PATCH', $url);
+    }
+
+    /** Creates a fully independent duplicate of a Drive file (its own file id,
+        its own bytes) — unlike moveFile, this never touches the original, so a
+        later delete of either copy can never affect the other one. */
+    public static function copyFile(string $fileId, string $name, string $newParentId): string
+    {
+        $result = self::request('POST', self::API_BASE . '/files/' . urlencode($fileId) . '/copy?fields=id', [
+            'name' => $name,
+            'parents' => [$newParentId],
+        ]);
+        return $result['id'];
+    }
+
+    /** Fetches a Drive file's byte size — needed to build a correct Content-Range
+        header when serving Range requests for files whose size isn't already
+        cached locally (e.g. background videos, which have no size_bytes column). */
+    public static function getFileSize(string $fileId): int
+    {
+        $meta = self::request('GET', self::API_BASE . '/files/' . urlencode($fileId) . '?fields=size');
+        return (int) ($meta['size'] ?? 0);
+    }
+
     /**
      * Streams Drive's own pre-generated thumbnail (a small JPEG, regardless of the
      * original format) instead of the full original file — used for in-app previews
@@ -267,6 +301,13 @@ final class GoogleDriveClient
         $options = [
             CURLOPT_CUSTOMREQUEST => $method,
             CURLOPT_RETURNTRANSFER => true,
+            // These are lightweight metadata calls (create/delete/move/get-size) —
+            // never a big transfer — so a bounded timeout is always safe here.
+            // Without one, a stale/unreachable Drive reference (or a network
+            // hiccup) hangs this cURL call forever, which on PHP-FPM ties up a
+            // whole worker process indefinitely rather than just failing the request.
+            CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_TIMEOUT => 30,
         ];
         if ($jsonBody !== null) {
             $headers[] = 'Content-Type: application/json';

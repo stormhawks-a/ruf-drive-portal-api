@@ -125,7 +125,155 @@ function folders_update(array $params): void
         Db::execute('UPDATE folders SET name = ? WHERE id = ?', [$name, $id]);
         AuditLogger::log($user['id'], $user['name'], $user['role'], 'FOLDER_RENAME', "Klasör yeniden adlandırıldı: {$folder['name']} -> {$name}");
     }
+
+    if (array_key_exists('parentId', $body)) {
+        $newParentId = $body['parentId'];
+        if ($newParentId === $folder['parent_id']) {
+            Response::json(['ok' => true]);
+            return;
+        }
+        if ($newParentId !== null) {
+            $newParent = Db::queryOne('SELECT * FROM folders WHERE id = ? AND deleted_at IS NULL', [$newParentId]);
+            if ($newParent === null) {
+                Response::error('Hedef klasör bulunamadı.', 404);
+            }
+            Scope::assertFolderAccessible($user, $newParentId);
+            // A folder can never be moved into itself or one of its own descendants —
+            // that would detach the subtree from the tree root while every FK still
+            // points "down" into it, which corrupts every recursive walk (delete,
+            // restore, size, preview icons) into an infinite loop.
+            if (in_array($newParentId, folders_collect_descendant_ids($id), true)) {
+                Response::error('Bir klasör kendi alt klasörünün içine taşınamaz.', 422);
+            }
+        }
+
+        $oldParentId = $folder['parent_id'];
+        Db::execute('UPDATE folders SET parent_id = ? WHERE id = ?', [$newParentId, $id]);
+        AuditLogger::log($user['id'], $user['name'], $user['role'], 'FOLDER_MOVE', "Klasör taşındı: {$folder['name']}");
+
+        // Best-effort Drive mirror, same tolerance as folders_create: the move
+        // already succeeded in our own DB regardless of whether Drive's side
+        // works, so a transient Drive/network error never blocks the user.
+        try {
+            if ($folder['drive_folder_id'] !== null) {
+                $oldDriveParentId = folders_resolve_drive_parent($oldParentId);
+                $newDriveParentId = folders_resolve_drive_parent($newParentId);
+                if ($newDriveParentId !== null) {
+                    GoogleDriveClient::moveFile($folder['drive_folder_id'], $oldDriveParentId, $newDriveParentId);
+                }
+            }
+        } catch (Throwable $e) {
+            error_log('Drive klasor tasima basarisiz: ' . $e->getMessage());
+        }
+    }
+
     Response::json(['ok' => true]);
+}
+
+/**
+ * Recursively clones one folder's whole subtree (itself, every nested folder,
+ * every file at any depth) under $newParentId — a real Drive-side copy for
+ * every file and folder (GoogleDriveClient::createFolder/copyFile), never a
+ * second DB row sharing a drive id with the original, so the two trees are
+ * fully independent afterward. Appends every newly created row into
+ * &$createdFolders/&$createdFiles so the caller can hand the whole batch back
+ * to the frontend in one response (unlike a move, the frontend has no local
+ * copy of any of these new rows to patch in optimistically).
+ */
+function folders_copy_subtree(
+    string $sourceFolderId,
+    string $newParentId,
+    ?string $newDriveParentId,
+    array $actingUser,
+    array &$createdFolders,
+    array &$createdFiles
+): string {
+    $folder = Db::queryOne('SELECT * FROM folders WHERE id = ?', [$sourceFolderId]);
+
+    $newId = Ids::generate('folder');
+    $newDriveFolderId = null;
+    if ($newDriveParentId !== null) {
+        try {
+            $newDriveFolderId = GoogleDriveClient::createFolder($folder['name'], $newDriveParentId);
+        } catch (Throwable $e) {
+            error_log('Drive klasor kopyalama basarisiz: ' . $e->getMessage());
+        }
+    }
+    Db::execute('INSERT INTO folders (id, name, parent_id, drive_folder_id) VALUES (?, ?, ?, ?)', [$newId, $folder['name'], $newParentId, $newDriveFolderId]);
+    $createdFolders[] = Db::queryOne('SELECT * FROM folders WHERE id = ?', [$newId]);
+
+    $files = Db::query('SELECT * FROM files WHERE parent_id = ? AND deleted_at IS NULL', [$sourceFolderId]);
+    foreach ($files as $file) {
+        $newFileId = Ids::generate('file');
+        $newDriveFileId = null;
+        if ($file['drive_file_id'] !== null && $newDriveFolderId !== null) {
+            try {
+                $newDriveFileId = GoogleDriveClient::copyFile($file['drive_file_id'], $file['name'], $newDriveFolderId);
+            } catch (Throwable $e) {
+                error_log('Drive dosya kopyalama basarisiz: ' . $e->getMessage());
+            }
+        }
+        Db::execute(
+            'INSERT INTO files (id, name, original_name, size_bytes, mime_type, file_type, parent_id, owner_id, drive_file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [$newFileId, $file['name'], $file['original_name'], $file['size_bytes'], $file['mime_type'], $file['file_type'], $newId, $actingUser['id'], $newDriveFileId]
+        );
+        $createdFiles[] = Db::queryOne('SELECT * FROM files WHERE id = ?', [$newFileId]);
+    }
+
+    $subfolders = Db::query('SELECT id FROM folders WHERE parent_id = ? AND deleted_at IS NULL', [$sourceFolderId]);
+    foreach ($subfolders as $sub) {
+        folders_copy_subtree($sub['id'], $newId, $newDriveFolderId, $actingUser, $createdFolders, $createdFiles);
+    }
+
+    return $newId;
+}
+
+function folders_copy(array $params): void
+{
+    $user = Auth::currentUser() ?? shared_links_resolve_acting_user();
+    if ($user === null) {
+        Response::error('Oturum açmanız gerekiyor.', 401);
+    }
+    $id = $params['id'];
+    $folder = Db::queryOne('SELECT * FROM folders WHERE id = ? AND deleted_at IS NULL', [$id]);
+    if ($folder === null) {
+        Response::error('Klasör bulunamadı.', 404);
+    }
+    Scope::assertFolderAccessible($user, $id);
+
+    $body = Response::body();
+    $destParentId = $body['parentId'] ?? null;
+    if ($destParentId === null) {
+        Response::error('Hedef klasör zorunlu.', 422);
+    }
+    $destFolder = Db::queryOne('SELECT * FROM folders WHERE id = ? AND deleted_at IS NULL', [$destParentId]);
+    if ($destFolder === null) {
+        Response::error('Hedef klasör bulunamadı.', 404);
+    }
+    Scope::assertFolderAccessible($user, $destParentId);
+
+    // Same cycle guard as move: copying a folder into its own subtree would mean
+    // the freshly-created copy immediately becomes one of the folders left to
+    // copy, recursing forever.
+    if (in_array($destParentId, folders_collect_descendant_ids($id), true)) {
+        Response::error('Bir klasör kendi alt klasörünün içine kopyalanamaz.', 422);
+    }
+
+    // A folder with many nested files means many sequential Drive API calls —
+    // easily longer than PHP's default execution-time cap on a normal request.
+    @set_time_limit(0);
+
+    $createdFolders = [];
+    $createdFiles = [];
+    $newId = folders_copy_subtree($id, $destParentId, $destFolder['drive_folder_id'], $user, $createdFolders, $createdFiles);
+
+    AuditLogger::log($user['id'], $user['name'], $user['role'], 'FOLDER_COPY', "Klasör kopyalandı: {$folder['name']}");
+
+    Response::json([
+        'folder' => Db::queryOne('SELECT * FROM folders WHERE id = ?', [$newId]),
+        'allFolders' => $createdFolders,
+        'allFiles' => $createdFiles,
+    ], 201);
 }
 
 function folders_delete(array $params): void
@@ -236,4 +384,5 @@ return [
     ['DELETE', '#^/folders/(?P<id>[a-zA-Z0-9_]+)$#', 'folders_delete'],
     ['POST', '#^/folders/(?P<id>[a-zA-Z0-9_]+)/restore$#', 'folders_restore'],
     ['POST', '#^/folders/(?P<id>[a-zA-Z0-9_]+)/register-download$#', 'folders_register_download'],
+    ['POST', '#^/folders/(?P<id>[a-zA-Z0-9_]+)/copy$#', 'folders_copy'],
 ];

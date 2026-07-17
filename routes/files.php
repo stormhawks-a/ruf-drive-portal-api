@@ -265,7 +265,87 @@ function files_update(array $params): void
         Db::execute('UPDATE files SET name = ? WHERE id = ?', [$name, $id]);
         AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_RENAME', "Dosya yeniden adlandırıldı: {$file['name']} -> {$name}");
     }
+
+    if (array_key_exists('parentId', $body)) {
+        $newParentId = $body['parentId'];
+        if ($newParentId !== $file['parent_id']) {
+            if ($newParentId === null) {
+                Response::error('Hedef klasör bulunamadı.', 404);
+            }
+            $newParent = Db::queryOne('SELECT * FROM folders WHERE id = ? AND deleted_at IS NULL', [$newParentId]);
+            if ($newParent === null) {
+                Response::error('Hedef klasör bulunamadı.', 404);
+            }
+            Scope::assertFolderAccessible($user, $newParentId);
+
+            $oldParentId = $file['parent_id'];
+            Db::execute('UPDATE files SET parent_id = ? WHERE id = ?', [$newParentId, $id]);
+            AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_MOVE', "Dosya taşındı: {$file['name']}");
+
+            try {
+                if ($file['drive_file_id'] !== null) {
+                    $oldDriveParentId = folders_resolve_drive_parent($oldParentId);
+                    $newDriveParentId = folders_resolve_drive_parent($newParentId);
+                    if ($newDriveParentId !== null) {
+                        GoogleDriveClient::moveFile($file['drive_file_id'], $oldDriveParentId, $newDriveParentId);
+                    }
+                }
+            } catch (Throwable $e) {
+                error_log('Drive dosya tasima basarisiz: ' . $e->getMessage());
+            }
+        }
+    }
+
     Response::json(['ok' => true]);
+}
+
+/** Duplicates a file into another folder (same or a different customer) — a real
+    Drive-side copy (GoogleDriveClient::copyFile), not a second DB row pointing at
+    the same drive_file_id, so deleting either copy later can never touch the
+    other one. Lets the same file be handed to two customers without uploading
+    the bytes twice. */
+function files_copy(array $params): void
+{
+    $user = Auth::currentUser() ?? shared_links_resolve_acting_user();
+    if ($user === null) {
+        Response::error('Oturum açmanız gerekiyor.', 401);
+    }
+    $id = $params['id'];
+    $file = Db::queryOne('SELECT * FROM files WHERE id = ? AND deleted_at IS NULL', [$id]);
+    if ($file === null) {
+        Response::error('Dosya bulunamadı.', 404);
+    }
+    Scope::assertFolderAccessible($user, $file['parent_id']);
+
+    $body = Response::body();
+    $destParentId = $body['parentId'] ?? null;
+    if ($destParentId === null) {
+        Response::error('Hedef klasör zorunlu.', 422);
+    }
+    $destFolder = Db::queryOne('SELECT * FROM folders WHERE id = ? AND deleted_at IS NULL', [$destParentId]);
+    if ($destFolder === null) {
+        Response::error('Hedef klasör bulunamadı.', 404);
+    }
+    Scope::assertFolderAccessible($user, $destParentId);
+
+    $newId = Ids::generate('file');
+    $newDriveFileId = null;
+    if ($file['drive_file_id'] !== null && $destFolder['drive_folder_id'] !== null) {
+        try {
+            $newDriveFileId = GoogleDriveClient::copyFile($file['drive_file_id'], $file['name'], $destFolder['drive_folder_id']);
+        } catch (Throwable $e) {
+            error_log('Drive dosya kopyalama basarisiz: ' . $e->getMessage());
+        }
+    }
+
+    Db::execute(
+        'INSERT INTO files (id, name, original_name, size_bytes, mime_type, file_type, parent_id, owner_id, drive_file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [$newId, $file['name'], $file['original_name'], $file['size_bytes'], $file['mime_type'], $file['file_type'], $destParentId, $user['id'], $newDriveFileId]
+    );
+    AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_COPY', "Dosya kopyalandı: {$file['name']}");
+
+    $row = Db::queryOne('SELECT * FROM files WHERE id = ?', [$newId]);
+    Response::json(['file' => $row], 201);
 }
 
 function files_delete(array $params): void
@@ -383,4 +463,5 @@ return [
     ['PUT', '#^/files/(?P<id>[a-zA-Z0-9_]+)$#', 'files_update'],
     ['DELETE', '#^/files/(?P<id>[a-zA-Z0-9_]+)$#', 'files_delete'],
     ['POST', '#^/files/(?P<id>[a-zA-Z0-9_]+)/restore$#', 'files_restore'],
+    ['POST', '#^/files/(?P<id>[a-zA-Z0-9_]+)/copy$#', 'files_copy'],
 ];
