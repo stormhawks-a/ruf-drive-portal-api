@@ -368,7 +368,20 @@ function files_delete(array $params): void
     }
     Scope::assertFolderAccessible($user, $file['parent_id']);
 
-    Db::execute('UPDATE files SET deleted_at = NOW(), deleted_by = ? WHERE id = ?', [$user['id'], $id]);
+    // Staff browsing into a customer's own folder tree (via the admin dashboard,
+    // not a share link) still gets attributed to that customer in deleted_by —
+    // see Scope::resolveOwningCustomerId's own docblock. A real customer deleting
+    // their own file, or staff deleting something outside any customer's tree,
+    // is unaffected (owningCustomerId is null there, or equals $user['id']).
+    $deletedById = $user['id'];
+    if ($user['role'] !== 'CUSTOMER') {
+        $owningCustomerId = Scope::resolveOwningCustomerId($file['parent_id']);
+        if ($owningCustomerId !== null) {
+            $deletedById = $owningCustomerId;
+        }
+    }
+
+    Db::execute('UPDATE files SET deleted_at = NOW(), deleted_by = ? WHERE id = ?', [$deletedById, $id]);
     AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_DELETE', "Dosya çöp kutusuna taşındı: {$file['name']}");
     Response::json(['ok' => true]);
 }

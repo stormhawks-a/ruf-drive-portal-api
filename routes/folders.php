@@ -295,6 +295,20 @@ function folders_delete(array $params): void
     // since their parent was hidden) instead of showing up in the trash.
     // Items already in the trash (deleted independently, earlier) are left alone.
     $descendantIds = folders_collect_descendant_ids($id);
+
+    // Staff browsing into a customer's own folder tree (via the admin dashboard,
+    // not a share link) still gets attributed to that customer in deleted_by —
+    // see Scope::resolveOwningCustomerId's own docblock. A real customer deleting
+    // their own folder, or staff deleting something outside any customer's tree,
+    // is unaffected (owningCustomerId is null there, or equals $user['id']).
+    $deletedById = $user['id'];
+    if ($user['role'] !== 'CUSTOMER') {
+        $owningCustomerId = Scope::resolveOwningCustomerId($id);
+        if ($owningCustomerId !== null) {
+            $deletedById = $owningCustomerId;
+        }
+    }
+
     // NOW() (MySQL's own clock), not PHP's date() — PHP defaults to UTC with no
     // timezone configured anywhere in this app, while MySQL's CURRENT_TIMESTAMP
     // (used for created_at etc.) follows the server's local timezone. Mixing the
@@ -304,11 +318,11 @@ function folders_delete(array $params): void
     $placeholders = implode(',', array_fill(0, count($descendantIds), '?'));
     Db::execute(
         "UPDATE folders SET deleted_at = NOW(), deleted_by = ? WHERE id IN ($placeholders) AND deleted_at IS NULL",
-        array_merge([$user['id']], $descendantIds)
+        array_merge([$deletedById], $descendantIds)
     );
     Db::execute(
         "UPDATE files SET deleted_at = NOW(), deleted_by = ? WHERE parent_id IN ($placeholders) AND deleted_at IS NULL",
-        array_merge([$user['id']], $descendantIds)
+        array_merge([$deletedById], $descendantIds)
     );
     AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_DELETE', "Klasör çöp kutusuna taşındı: {$folder['name']}");
     Response::json(['ok' => true]);
