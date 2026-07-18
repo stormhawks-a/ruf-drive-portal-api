@@ -698,3 +698,59 @@ it; don't assume frontend changes are backed up anywhere until then.
     a cPanel Cron Job once a day (see Deployment section) — this app has no
     persistent process to run a real scheduler, so an external HTTP ping is
     the only option on this host.
+
+27. **A row's own delete icon must check whether it's part of a larger
+    selection, or "delete" only ever means "delete this one row."** The
+    customer-panel sidebar (`App.tsx`) lets several folders be checked at
+    once, but each row's trash icon only ever carried its own id — clicking
+    delete on one checked row deleted only that row, silently leaving the
+    other checked ones untouched, which read as "select multiple, delete
+    button doesn't delete the selection." Fixed in the shared delete-confirm
+    modal's confirm handler: if the clicked item is itself part of a
+    multi-item selection, delete everything selected (`Promise.all` over both
+    `wtSelectedFolderIds`/`wtSelectedFileIds`); otherwise just the one row, so
+    deleting an unchecked row never reaches into an unrelated selection sitting
+    elsewhere. Second half of the same fix: every delete path now strips the
+    deleted id(s) out of the selection state afterward — without this, a
+    deleted item kept showing up "checked" the next time it was rendered,
+    most visibly popping up pre-selected inside Çöp Sepeti (which reads the
+    same lifted `wtSelectedFolderIds`/`wtSelectedFileIds` DriveInterface
+    receives as props) even though nobody had touched a checkbox there.
+
+28. **A one-shot CSS animation needs an explicit resting state, or it freezes
+    at "fully visible" once it ends.** The sidebar's download button plays a
+    light-sweep shimmer (`ruf-btn-shimmer` keyframes) across itself the
+    instant its label flips between "Tümünü İndir" and "Seçilenleri İndir".
+    The shimmer `<span>` had no `animation-fill-mode: forwards` and no
+    explicit resting `opacity` class — so the instant the 0.7s animation
+    finished, the element snapped back to its *un-animated* CSS (fully
+    opaque, untransformed), leaving a permanent vertical light bar sitting on
+    the button forever instead of disappearing. Fixed by adding `opacity-0`
+    as the element's own resting class; the keyframes still override it
+    (0 → 1 → 0) while running, then it correctly reverts to invisible once
+    they stop. General lesson: any one-shot CSS animation that isn't meant to
+    freeze on its last frame needs the *rest state* styled explicitly on the
+    element itself — don't rely on "the animation will just end and disappear."
+
+29. **The customer-panel sidebar redesign ("Kompakt Liste") was ported to the
+    Tüketici (Consumer) panel too, reusing the same patterns but keeping that
+    panel's own dark navy/amber identity** (never switched to the customer
+    panel's pastel/blue palette — the two are deliberately different themes,
+    only the *interaction* patterns are shared): identity info with no card
+    box behind it (`mix-blend-difference` text instead of a shadow, so it
+    inverts against whatever photo is directly behind it rather than relying
+    on a fixed shadow that only sometimes has contrast), a centered
+    "Dökümanlar" label, folder/file rows with a tinted icon badge, and one
+    shared single "download everything / download selected" button pattern
+    with the one-shot shimmer (separate shimmer-tracking state per panel —
+    `wtDownloadBtnShimmer` for the customer panel, `consumerDownloadBtnShimmer`
+    for Tüketici — since they're two independent selection scopes). A pastel
+    yellow icon-only share button sits beside the customer panel's download
+    button (disabled/dim until something's checked, since sharing only ever
+    applies to a selection, never to "everything" the way download defaults);
+    deliberately **not** added to the Tüketici panel, which must stay
+    download-only — no preview, edit, rename, delete, or re-sharing. The old
+    floating "N Öğe Seçildi" pill (with its own İndir/Paylaş buttons) was
+    removed entirely from the customer panel; its only remaining job is
+    showing the running count + a clear-selection button, since download and
+    share both moved into the sidebar's own controls.
