@@ -340,7 +340,12 @@ function folders_permanent_delete(array $params): void
     $id = $params['id'];
     $folder = Db::queryOne('SELECT * FROM folders WHERE id = ?', [$id]);
     if ($folder === null) {
-        Response::error('Klasör bulunamadı.', 404);
+        // Idempotent, same reasoning as files_permanent_delete: a folder whose
+        // OWN ancestor is also in the same bulk batch can already be gone by
+        // the time this request lands (the ancestor's cascade delete got there
+        // first) — the caller's desired end state (this row gone) is already
+        // true, so this succeeds quietly instead of 404-ing.
+        Response::json(['ok' => true]);
     }
     if ($folder['deleted_at'] === null) {
         Response::error('Sadece çöp kutusundaki klasörler kalıcı olarak silinebilir.', 422);

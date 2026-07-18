@@ -396,7 +396,15 @@ function files_permanent_delete(array $params): void
     $id = $params['id'];
     $file = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
     if ($file === null) {
-        Response::error('Dosya bulunamadı.', 404);
+        // Treat "already gone" as success, not a 404 — a bulk permanent-delete
+        // fires one request per selected id independently, and a file whose
+        // parent folder is in the SAME batch can legitimately have its row
+        // removed by that folder's own cascade (see folders_permanent_delete)
+        // microseconds before this file's own request reaches the DB. DELETE
+        // is idempotent by nature: the end state the caller wanted (this row
+        // gone) is already true, so this should succeed quietly rather than
+        // flood the UI with one "Dosya bulunamadı" alert per affected file.
+        Response::json(['ok' => true]);
     }
     if ($file['deleted_at'] === null) {
         Response::error('Sadece çöp kutusundaki dosyalar kalıcı olarak silinebilir.', 422);
