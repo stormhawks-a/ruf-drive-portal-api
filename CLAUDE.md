@@ -267,6 +267,13 @@ it; don't assume frontend changes are backed up anywhere until then.
   cover this. Every search/filter comparison in `DriveInterface.tsx` and
   `LogPanel.tsx` goes through this one helper — route any new search feature
   through it too rather than reaching for `.toLowerCase()` directly.
+- **Trash is soft-delete-only in the app itself; `routes/trash.php`'s
+  `GET /trash/purge?token=...` is the only thing that ever hard-deletes a
+  trashed folder/file** (DB row + real Drive bytes), for anything past 30
+  days. It's not called from anywhere in the app — it's designed to be pinged
+  once a day by an external cPanel Cron Job, shared-secret-authenticated
+  (`cron_secret` in `config.php`) since a cron job has no session to check
+  against. See gotcha #26 for the deploy-dependency trap this surfaced.
 
 ## Deployment (Natro shared hosting)
 
@@ -287,6 +294,13 @@ it; don't assume frontend changes are backed up anywhere until then.
   account and hijack the Drive connection. Recreate from git history
   (`git log --all --  oauth_authorize.php`) if re-authorization is ever needed,
   and delete it again afterward.
+- One-time (per environment) cPanel Cron Job needed for the 30-day trash purge
+  (see gotcha #26): add `cron_secret` to `config.php` (not in git), then in
+  cPanel → Cron Jobs, run once daily:
+  `curl -s "https://teslim.workonruf.com/backend/trash/purge?token=YOUR_CRON_SECRET"`
+  (or `wget -q -O /dev/null "..."` — either works, cPanel's UI takes a plain
+  command line). Nothing purges, ever, until both the config value and this
+  cron job exist — the route fails closed (401) with no `cron_secret` set.
 
 ## Hard-won gotchas (read before repeating them)
 
@@ -663,3 +677,24 @@ it; don't assume frontend changes are backed up anywhere until then.
     feature, but deliberately left alone here since the actual ask was just
     "stop mislabeling a preview as a download," not "start tracking previews
     too."
+
+26. **"Silinen öğeler 30 gün saklanır" was pure UI copy — nothing ever actually
+    purged anything.** `folders_delete`/`files_delete` are soft-deletes only
+    (`deleted_at`), and there was no code anywhere that ever hard-deleted an
+    old trashed row, in Drive or the DB — items sat in trash forever,
+    contradicting what the UI told the customer. Also surfaced a real,
+    separate bug while investigating: the customer-panel trash chip
+    (`hasOwnTrash` in `App.tsx`) correctly hides itself when there's nothing
+    of the viewer's own in the trash — but this only works if the *data
+    fetch itself* still includes trashed rows in the first place, which
+    depends on already-shipped-but-maybe-not-yet-deployed fixes to
+    `folders_delete`'s cascade and `shared_links_collect_content`'s
+    `$includeDeleted` flag (both from commit `2cb6739`) — if trash
+    disappears on refresh, suspect a stale backend deploy before touching
+    the frontend check itself again. Added `routes/trash.php`
+    (`GET /trash/purge?token=...`, shared-secret auth since a cron job has no
+    session) that hard-deletes both DB rows *and* the real Drive file/folder
+    for anything with `deleted_at` older than 30 days, meant to be called by
+    a cPanel Cron Job once a day (see Deployment section) — this app has no
+    persistent process to run a real scheduler, so an external HTTP ping is
+    the only option on this host.

@@ -13,6 +13,10 @@ return [
     // openssl_encrypt/decrypt icin 32 baytlik rastgele bir anahtar.
     // Uretmek icin: php -r "echo bin2hex(random_bytes(32));"
     'app_secret' => 'CHANGE_ME_32_BYTE_HEX_KEY',
+    // cPanel Cron Job'un /trash/purge?token=... cagirirken kullanacagi paylasilan
+    // sifre — gercek bir oturum degil, sadece bu tek endpoint'i disaridan
+    // korumak icin. Uretmek icin: php -r "echo bin2hex(random_bytes(16));"
+    'cron_secret' => 'CHANGE_ME_RANDOM_TOKEN',
     'session_name' => 'ruf_session',
     // Prod'da mutlaka true olmali (HTTPS zorunlu). Sadece yerel http test icin false.
     'secure_cookies' => true,
