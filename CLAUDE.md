@@ -223,6 +223,17 @@ it; don't assume frontend changes are backed up anywhere until then.
   (0=every position collapses toward dead-center, deliberately allowing
   overlap, 100=the original edge-biased spread) — both interpolate via the
   same `lerp`, and are orthogonal to each other.
+- **`BackgroundCta` has three mutually exclusive styles** (`ctaStyle`:
+  `"cursor" | "fixed" | "fullBackground"`), all sharing one `ctaLabel`/
+  `ctaUrl` pair. `"fullBackground"` (added alongside the mouse-tracking fix
+  in gotcha #24) shows no visible tag/button at all — the whole backdrop
+  becomes one `inset-0` click target — for a client who'd rather every empty
+  pixel of the background be clickable than hunt for a small tag. `App.tsx`'s
+  two render sites both fall back to `"cursor"` only when `ctaStyle` is
+  neither `"fixed"` nor `"fullBackground"`; a naive `=== "fixed" ? "fixed" :
+  "cursor"` ternary (the original shape, before this style existed) would
+  have silently downgraded `"fullBackground"` to `"cursor"` — worth
+  remembering if a fourth style is ever added here.
 - **Tüketici (consumer) share links can optionally be read-only-browsable**
   (`shared_links.allow_preview`, only ever meaningful when `view_mode =
   'consumer'`): unlike a `'customer'` view-mode link (which grants real
@@ -610,3 +621,25 @@ it; don't assume frontend changes are backed up anywhere until then.
     missing migration on the specific fields involved before anything else —
     it produces exactly this "looks fine to me, broken for everyone else"
     shape of bug.
+
+24. **Fixing the pointer-events ancestor bug (#20) wasn't the end of the CTA/
+    parallax story** — `CollageBackground.tsx` itself still tracked the mouse
+    via a plain React `onMouseMove` on its own root div. That's an
+    element-scoped listener: whenever the cursor sits directly over
+    `BackgroundCta`'s round tag (which must stay `pointer-events-auto` to be
+    clickable), the browser's real hit-test target *is* the tag, not the
+    collage's div underneath, so the collage's own `onMouseMove` simply never
+    fires for that patch of screen and the photos freeze right under the tag.
+    Fixed by moving the collage's tracking to a `window`-level `mousemove`
+    listener too (the same trick already used inside `BackgroundCta` itself),
+    which fires regardless of what element is hit-tested. Same fix also
+    solved a second, unrelated complaint for free: photos used to snap back to
+    dead-center on `onMouseLeave`. Removing that handler and instead clamping
+    the tracked position to the container's own rect means the offset simply
+    saturates at whichever edge the cursor exits from and stops changing
+    there — the photos freeze exactly where they were at the moment of exit
+    and resume the instant the cursor re-enters from anywhere, with no special
+    re-entry logic needed. General lesson: any "mouse-driven visual effect
+    freezes under an interactive overlay" bug should be suspected as this same
+    element-scoped-listener-vs-pointer-events-hit-test conflict, and the fix
+    is almost always "track on `window` instead of on the specific element."
