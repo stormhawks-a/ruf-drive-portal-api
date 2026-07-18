@@ -117,12 +117,19 @@ function files_download(array $params): void
     // sets this flag, so it still counts on its own as before.
     $skipCount = isset($_GET['skipCount']) && $_GET['skipCount'] === '1';
 
+    // The PDF preview modal (PreviewModal.tsx) streams the file inline through
+    // this exact same endpoint with ?inline=1 so it can render in an <iframe>
+    // instead of prompting a save dialog — that's not a download the user
+    // asked for, just a peek, so it must never log FILE_DOWNLOAD or bump
+    // either download counter. Only the real download link (no ?inline) does.
+    $isInlinePreview = isset($_GET['inline']) && $_GET['inline'] === '1';
+
     // Two ways in: a real logged-in account scoped to this file's folder, or an
     // unlocked share-link session whose shared scope includes this file.
     $user = Auth::currentUser();
     if ($user !== null) {
         Scope::assertFolderAccessible($user, $file['parent_id']);
-        if (!$isContinuation) {
+        if (!$isContinuation && !$isInlinePreview) {
             AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_DOWNLOAD', "Dosya indirildi: {$file['name']}");
             if (!$skipCount) {
                 Db::execute('UPDATE files SET download_count = download_count + 1 WHERE id = ?', [$id]);
@@ -133,7 +140,7 @@ function files_download(array $params): void
         if ($shareLinkId === null || !shared_links_grants_file($shareLinkId, $file)) {
             Response::error('Oturum açmanız gerekiyor.', 401);
         }
-        if (!$isContinuation) {
+        if (!$isContinuation && !$isInlinePreview) {
             Db::execute('UPDATE shared_links SET download_count = download_count + 1 WHERE id = ?', [$shareLinkId]);
             if (!$skipCount) {
                 Db::execute('UPDATE files SET download_count = download_count + 1 WHERE id = ?', [$id]);

@@ -643,3 +643,23 @@ it; don't assume frontend changes are backed up anywhere until then.
     freezes under an interactive overlay" bug should be suspected as this same
     element-scoped-listener-vs-pointer-events-hit-test conflict, and the fix
     is almost always "track on `window` instead of on the specific element."
+
+25. **Previewing a file counted as downloading it.** `files_download` is one
+    shared route for two very different things: a real "save this file"
+    download, and the PDF/video preview modal streaming the same bytes inline
+    (`?inline=1`) purely to render in an `<iframe>`/`<video>`. The
+    `Content-Disposition` header already branched on `inline`, but the
+    audit-log call and the `download_count`/`shared_links.download_count`
+    increments above it didn't — so opening a PDF preview (or just letting a
+    video autoplay in the modal) silently logged a `FILE_DOWNLOAD` entry and
+    inflated the download-stats leaderboard, with no real download ever
+    having happened. Fixed by computing the `inline` flag once, up front, and
+    skipping both the log and both counters whenever it's set — a real
+    download (no `?inline`) is unaffected. Reported by a staff user seeing an
+    unexplained download entry in "İşlem Logları" for a document they'd only
+    opened to look at. The schema already has an unused `FILE_PREVIEW` audit
+    action enum value sitting there for exactly this distinction, never
+    wired up — worth using if "who previewed what" ever becomes a wanted
+    feature, but deliberately left alone here since the actual ask was just
+    "stop mislabeling a preview as a download," not "start tracking previews
+    too."
