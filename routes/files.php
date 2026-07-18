@@ -392,7 +392,7 @@ function files_delete(array $params): void
     active file), same guard the 30-day auto-purge in routes/trash.php relies on. */
 function files_permanent_delete(array $params): void
 {
-    $user = Auth::requireRole(['ADMIN', 'EDITOR']);
+    $user = Auth::requireRole('ADMIN');
     $id = $params['id'];
     $file = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
     if ($file === null) {

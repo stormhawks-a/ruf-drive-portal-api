@@ -336,7 +336,7 @@ function folders_delete(array $params): void
     leaving no chance to look up their drive_folder_id/drive_file_id afterward). */
 function folders_permanent_delete(array $params): void
 {
-    $user = Auth::requireRole(['ADMIN', 'EDITOR']);
+    $user = Auth::requireRole('ADMIN');
     $id = $params['id'];
     $folder = Db::queryOne('SELECT * FROM folders WHERE id = ?', [$id]);
     if ($folder === null) {
