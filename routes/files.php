@@ -386,6 +386,34 @@ function files_delete(array $params): void
     Response::json(['ok' => true]);
 }
 
+/** Staff-only, irreversible — actually deletes the row and the Drive file, not
+    just a soft-delete. Only allowed on something already in the trash (a
+    permanent-delete button in the trash view has no business touching an
+    active file), same guard the 30-day auto-purge in routes/trash.php relies on. */
+function files_permanent_delete(array $params): void
+{
+    $user = Auth::requireRole(['ADMIN', 'EDITOR']);
+    $id = $params['id'];
+    $file = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
+    if ($file === null) {
+        Response::error('Dosya bulunamadı.', 404);
+    }
+    if ($file['deleted_at'] === null) {
+        Response::error('Sadece çöp kutusundaki dosyalar kalıcı olarak silinebilir.', 422);
+    }
+
+    if ($file['drive_file_id'] !== null) {
+        try {
+            GoogleDriveClient::deleteFile($file['drive_file_id']);
+        } catch (Throwable $e) {
+            error_log('Kalıcı silme: Drive dosya silme hatası ' . $id . ': ' . $e->getMessage());
+        }
+    }
+    Db::execute('DELETE FROM files WHERE id = ?', [$id]);
+    AuditLogger::log($user['id'], $user['name'], $user['role'], 'PERMISSION_CHANGE', "Dosya kalıcı olarak silindi: {$file['name']}");
+    Response::json(['ok' => true]);
+}
+
 function files_restore(array $params): void
 {
     $user = Auth::currentUser() ?? shared_links_resolve_acting_user();
@@ -482,6 +510,7 @@ return [
     ['GET', '#^/files/(?P<id>[a-zA-Z0-9_]+)/thumbnail$#', 'files_thumbnail'],
     ['PUT', '#^/files/(?P<id>[a-zA-Z0-9_]+)$#', 'files_update'],
     ['DELETE', '#^/files/(?P<id>[a-zA-Z0-9_]+)$#', 'files_delete'],
+    ['DELETE', '#^/files/(?P<id>[a-zA-Z0-9_]+)/permanent$#', 'files_permanent_delete'],
     ['POST', '#^/files/(?P<id>[a-zA-Z0-9_]+)/restore$#', 'files_restore'],
     ['POST', '#^/files/(?P<id>[a-zA-Z0-9_]+)/copy$#', 'files_copy'],
 ];

@@ -328,6 +328,55 @@ function folders_delete(array $params): void
     Response::json(['ok' => true]);
 }
 
+/** Staff-only, irreversible — actually deletes the rows and the Drive files/folders
+    for the whole subtree, not just a soft-delete. Only allowed on something already
+    in the trash, same guard files_permanent_delete uses. Descendant folders/files
+    are collected and their Drive ids removed BEFORE any DB row is deleted (once the
+    root folder row is gone, the FK cascade would silently take the rest with it,
+    leaving no chance to look up their drive_folder_id/drive_file_id afterward). */
+function folders_permanent_delete(array $params): void
+{
+    $user = Auth::requireRole(['ADMIN', 'EDITOR']);
+    $id = $params['id'];
+    $folder = Db::queryOne('SELECT * FROM folders WHERE id = ?', [$id]);
+    if ($folder === null) {
+        Response::error('Klasör bulunamadı.', 404);
+    }
+    if ($folder['deleted_at'] === null) {
+        Response::error('Sadece çöp kutusundaki klasörler kalıcı olarak silinebilir.', 422);
+    }
+
+    $descendantIds = folders_collect_descendant_ids($id);
+    $placeholders = implode(',', array_fill(0, count($descendantIds), '?'));
+
+    $files = Db::query("SELECT id, drive_file_id FROM files WHERE parent_id IN ($placeholders)", $descendantIds);
+    foreach ($files as $file) {
+        if ($file['drive_file_id'] !== null) {
+            try {
+                GoogleDriveClient::deleteFile($file['drive_file_id']);
+            } catch (Throwable $e) {
+                error_log('Kalıcı silme: Drive dosya silme hatası ' . $file['id'] . ': ' . $e->getMessage());
+            }
+        }
+    }
+    Db::execute("DELETE FROM files WHERE parent_id IN ($placeholders)", $descendantIds);
+
+    $descendantFolders = Db::query("SELECT id, drive_folder_id FROM folders WHERE id IN ($placeholders)", $descendantIds);
+    foreach ($descendantFolders as $f) {
+        if ($f['drive_folder_id'] !== null) {
+            try {
+                GoogleDriveClient::deleteFile($f['drive_folder_id']);
+            } catch (Throwable $e) {
+                error_log('Kalıcı silme: Drive klasör silme hatası ' . $f['id'] . ': ' . $e->getMessage());
+            }
+        }
+    }
+    Db::execute("DELETE FROM folders WHERE id IN ($placeholders)", $descendantIds);
+
+    AuditLogger::log($user['id'], $user['name'], $user['role'], 'PERMISSION_CHANGE', "Klasör kalıcı olarak silindi: {$folder['name']}");
+    Response::json(['ok' => true]);
+}
+
 function folders_restore(array $params): void
 {
     $user = Auth::currentUser() ?? shared_links_resolve_acting_user();
@@ -396,6 +445,7 @@ return [
     ['POST', '#^/folders$#', 'folders_create'],
     ['PUT', '#^/folders/(?P<id>[a-zA-Z0-9_]+)$#', 'folders_update'],
     ['DELETE', '#^/folders/(?P<id>[a-zA-Z0-9_]+)$#', 'folders_delete'],
+    ['DELETE', '#^/folders/(?P<id>[a-zA-Z0-9_]+)/permanent$#', 'folders_permanent_delete'],
     ['POST', '#^/folders/(?P<id>[a-zA-Z0-9_]+)/restore$#', 'folders_restore'],
     ['POST', '#^/folders/(?P<id>[a-zA-Z0-9_]+)/register-download$#', 'folders_register_download'],
     ['POST', '#^/folders/(?P<id>[a-zA-Z0-9_]+)/copy$#', 'folders_copy'],
