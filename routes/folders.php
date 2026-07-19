@@ -88,19 +88,25 @@ function folders_create(array $params): void
     AuditLogger::log($user['id'], $user['name'], $user['role'], 'FOLDER_CREATE', "Klasör oluşturuldu: {$name}");
 
     // Best-effort Drive mirror: the folder already exists in our DB regardless of
-    // whether this succeeds, so a transient Drive/network error never blocks the user.
+    // whether this succeeds, so a transient Drive/network error never blocks the
+    // user. But a SILENT failure here is exactly what let a week-long Google OAuth
+    // outage (2026-07-19, refresh token expired) go completely unnoticed until
+    // someone happened to check Drive directly — `driveSyncOk` in the response
+    // lets the frontend surface a visible warning the moment this happens instead.
+    $driveSyncOk = false;
     try {
         $driveParentId = folders_resolve_drive_parent($parentId);
         if ($driveParentId !== null) {
             $driveFolderId = GoogleDriveClient::createFolder($name, $driveParentId);
             Db::execute('UPDATE folders SET drive_folder_id = ? WHERE id = ?', [$driveFolderId, $id]);
+            $driveSyncOk = true;
         }
     } catch (Throwable $e) {
         error_log('Drive klasor aynalama basarisiz: ' . $e->getMessage());
     }
 
     $row = Db::queryOne('SELECT * FROM folders WHERE id = ?', [$id]);
-    Response::json(['folder' => $row], 201);
+    Response::json(['folder' => $row, 'driveSyncOk' => $driveSyncOk], 201);
 }
 
 function folders_update(array $params): void

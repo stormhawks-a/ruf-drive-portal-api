@@ -90,7 +90,11 @@ function files_create(array $params): void
     AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_UPLOAD', "Dosya eklendi: {$name}");
 
     $row = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
-    Response::json(['file' => $row], 201);
+    // Lets the frontend show a visible warning when the Drive mirror silently
+    // failed (e.g. an expired Google OAuth token) instead of the file just
+    // quietly having no retrievable bytes until someone tries to open it —
+    // exactly what happened undetected for a week before 2026-07-19.
+    Response::json(['file' => $row, 'driveSyncOk' => $driveFileId !== null], 201);
 }
 
 function files_download(array $params): void
