@@ -336,12 +336,6 @@ function folders_delete(array $params): void
     leaving no chance to look up their drive_folder_id/drive_file_id afterward). */
 function folders_permanent_delete(array $params): void
 {
-    // Same reasoning as files_permanent_delete: this can call Drive once per
-    // descendant file/folder, and a single large file among them can make the
-    // whole request run long enough to hit PHP's default execution-time cap —
-    // remove that extra timer so a slow-but-fine delete doesn't get killed
-    // mid-request and come back as a raw 500 with nothing actually deleted.
-    @set_time_limit(0);
     $user = Auth::requireRole('ADMIN');
     $id = $params['id'];
     $folder = Db::queryOne('SELECT * FROM folders WHERE id = ?', [$id]);
@@ -360,7 +354,31 @@ function folders_permanent_delete(array $params): void
     $descendantIds = folders_collect_descendant_ids($id);
     $placeholders = implode(',', array_fill(0, count($descendantIds), '?'));
 
+    // Look up every descendant file/folder's Drive id BEFORE deleting any DB
+    // rows below — once those rows are gone there's no way to look this back
+    // up (the FK cascade would silently take it with them).
     $files = Db::query("SELECT id, drive_file_id FROM files WHERE parent_id IN ($placeholders)", $descendantIds);
+    $descendantFolders = Db::query("SELECT id, drive_folder_id FROM folders WHERE id IN ($placeholders)", $descendantIds);
+
+    Db::execute("DELETE FROM files WHERE parent_id IN ($placeholders)", $descendantIds);
+    Db::execute("DELETE FROM folders WHERE id IN ($placeholders)", $descendantIds);
+    AuditLogger::log($user['id'], $user['name'], $user['role'], 'PERMISSION_CHANGE', "Klasör kalıcı olarak silindi: {$folder['name']}");
+
+    // Respond immediately — the DB rows (what the user is actually waiting to
+    // see disappear) are already gone. A folder can contain a very large file
+    // that makes Drive take longer to acknowledge its delete than this host's
+    // own gateway/PHP-FPM timeout allows a request to wait for (not something
+    // adjustable from PHP's own max_execution_time — that ceiling is enforced
+    // by infrastructure in front of PHP). Finishing the response now and
+    // running every Drive-side delete afterward, off the client's back, means
+    // this request can never time out no matter how many/large the files are.
+    http_response_code(200);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => true]);
+    if (function_exists('fastcgi_finish_request')) {
+        fastcgi_finish_request();
+    }
+
     foreach ($files as $file) {
         if ($file['drive_file_id'] !== null) {
             try {
@@ -370,9 +388,6 @@ function folders_permanent_delete(array $params): void
             }
         }
     }
-    Db::execute("DELETE FROM files WHERE parent_id IN ($placeholders)", $descendantIds);
-
-    $descendantFolders = Db::query("SELECT id, drive_folder_id FROM folders WHERE id IN ($placeholders)", $descendantIds);
     foreach ($descendantFolders as $f) {
         if ($f['drive_folder_id'] !== null) {
             try {
@@ -382,10 +397,7 @@ function folders_permanent_delete(array $params): void
             }
         }
     }
-    Db::execute("DELETE FROM folders WHERE id IN ($placeholders)", $descendantIds);
-
-    AuditLogger::log($user['id'], $user['name'], $user['role'], 'PERMISSION_CHANGE', "Klasör kalıcı olarak silindi: {$folder['name']}");
-    Response::json(['ok' => true]);
+    exit;
 }
 
 function folders_restore(array $params): void

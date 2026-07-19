@@ -392,17 +392,6 @@ function files_delete(array $params): void
     active file), same guard the 30-day auto-purge in routes/trash.php relies on. */
 function files_permanent_delete(array $params): void
 {
-    // A very large Drive file can genuinely take Drive longer to acknowledge a
-    // delete than PHP's default execution-time cap allows — same reasoning as
-    // files_download's own @set_time_limit(0). Without this, PHP kills the
-    // script mid-request on a slow-but-otherwise-fine delete, producing a raw
-    // (non-JSON) 500 the frontend can only report as a generic "İstek
-    // başarısız oldu (500)" — and since that kill happens before the DB DELETE
-    // even runs, the file is left behind, looking like "nothing happened"
-    // despite the wait. The Drive call itself is still bounded by its own
-    // curl timeout (GoogleDriveClient::request, 30s) and swallowed by the
-    // try/catch below either way; this only removes PHP's own extra timer.
-    @set_time_limit(0);
     $user = Auth::requireRole('ADMIN');
     $id = $params['id'];
     $file = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
@@ -421,6 +410,28 @@ function files_permanent_delete(array $params): void
         Response::error('Sadece çöp kutusundaki dosyalar kalıcı olarak silinebilir.', 422);
     }
 
+    // Delete the DB row (the thing the user is actually waiting to see
+    // disappear) FIRST, then respond immediately — before the Drive call.
+    // A very large file can make Drive take genuinely longer to acknowledge
+    // a delete than this host's own gateway/PHP-FPM request timeout allows a
+    // request to wait (raising PHP's own max_execution_time doesn't help
+    // here: that ceiling is enforced by infrastructure in front of PHP, not
+    // by the script itself, and isn't something this codebase can adjust).
+    // Rather than race that ceiling, finish the response now — the row is
+    // already gone, which is the end state the user cares about — and run
+    // the actual Drive-side cleanup afterward, off the client's back, via
+    // fastcgi_finish_request() (falls back to running inline if unavailable,
+    // e.g. the local `php -S` dev server, which has no such ceiling anyway).
+    Db::execute('DELETE FROM files WHERE id = ?', [$id]);
+    AuditLogger::log($user['id'], $user['name'], $user['role'], 'PERMISSION_CHANGE', "Dosya kalıcı olarak silindi: {$file['name']}");
+
+    http_response_code(200);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => true]);
+    if (function_exists('fastcgi_finish_request')) {
+        fastcgi_finish_request();
+    }
+
     if ($file['drive_file_id'] !== null) {
         try {
             GoogleDriveClient::deleteFile($file['drive_file_id']);
@@ -428,9 +439,7 @@ function files_permanent_delete(array $params): void
             error_log('Kalıcı silme: Drive dosya silme hatası ' . $id . ': ' . $e->getMessage());
         }
     }
-    Db::execute('DELETE FROM files WHERE id = ?', [$id]);
-    AuditLogger::log($user['id'], $user['name'], $user['role'], 'PERMISSION_CHANGE', "Dosya kalıcı olarak silindi: {$file['name']}");
-    Response::json(['ok' => true]);
+    exit;
 }
 
 function files_restore(array $params): void
