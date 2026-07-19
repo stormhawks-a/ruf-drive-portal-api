@@ -259,13 +259,21 @@ final class GoogleDriveClient
         ]);
     }
 
+    /** Fetches arbitrary metadata fields for a Drive file (comma-separated, Drive
+        API `fields` syntax, e.g. "id,size,parents") — used both for simple size
+        lookups and for independently verifying a client's claim about an upload
+        (see routes/file_uploads.php's finalize endpoint) before trusting it. */
+    public static function getFileMeta(string $fileId, string $fields): array
+    {
+        return self::request('GET', self::API_BASE . '/files/' . urlencode($fileId) . '?fields=' . urlencode($fields));
+    }
+
     /** Fetches a Drive file's byte size — needed to build a correct Content-Range
         header when serving Range requests for files whose size isn't already
         cached locally (e.g. background videos, which have no size_bytes column). */
     public static function getFileSize(string $fileId): int
     {
-        $meta = self::request('GET', self::API_BASE . '/files/' . urlencode($fileId) . '?fields=size');
-        return (int) ($meta['size'] ?? 0);
+        return (int) (self::getFileMeta($fileId, 'size')['size'] ?? 0);
     }
 
     /**

@@ -82,24 +82,51 @@ it; don't assume frontend changes are backed up anywhere until then.
 - **Real folder downloads** (no ZIP at all): the frontend uses the File System
   Access API (`showDirectoryPicker`) for Chrome/Edge, falling back to the ZIP
   endpoint for Safari/Firefox, which don't implement that API.
-- **Large file uploads (100MB–tens of GB)**: `routes/file_uploads.php` +
-  `GoogleDriveClient::createResumableSession/uploadChunk`. The browser (see
-  `uploadLargeWithProgress` in `src/api.ts`) slices the file into 16MB chunks
-  and `PUT`s them one at a time to `/file-uploads/{id}/chunk`; this server
-  relays each chunk straight into a Drive resumable-upload session and never
-  buffers more than one chunk in memory, so the file size this can handle
-  isn't bounded by PHP's `memory_limit`. `filesApi.createWithProgress()`
-  switches to this path automatically above `LARGE_UPLOAD_THRESHOLD_BYTES`
-  (80MB) — everything below that still goes through the old single-request
-  multipart POST. A dropped chunk retries with exponential backoff and
-  re-queries `/file-uploads/{id}` for the real byte count before resending,
-  so a flaky connection resumes instead of restarting the whole file.
-  **A direct browser→Drive upload (skipping this server as a relay entirely)
-  is not possible** — verified with a real browser test against a live Drive
-  resumable session: Google's upload endpoint sends no
-  `Access-Control-Allow-Origin` header, so the browser blocks it as a CORS
-  violation before any bytes move. Don't re-attempt this; it's a Google-side
-  limitation, not something fixable from our code.
+- **Large file uploads (100MB–tens of GB)**: chunk *bytes* no longer touch this
+  server at all — they go browser → Cloudflare Worker (`cloudflare-worker/`,
+  deployed independently via `wrangler`, not cPanel) → Drive, because a direct
+  browser→Drive upload is a dead end (verified with a real browser test: Drive's
+  resumable-upload endpoint sends no `Access-Control-Allow-Origin`, so the
+  browser blocks it as CORS before any bytes move — don't re-attempt this, it's
+  Google-side), and this server's own inbound bandwidth is hard-capped by Natro
+  at ~1.8-1.9MB/s regardless (see gotcha #15) — nowhere near the ~15MB/s
+  browser↔Drive / ~16-27MB/s server↔Drive both ends are independently capable
+  of. This server (`routes/file_uploads.php`) only ever handles small
+  control-plane calls now:
+  - `POST /file-uploads` (`file_uploads_start`): same access checks as before
+    (`Scope::assertFolderAccessible`), calls
+    `GoogleDriveClient::createResumableSession` to open the real Drive session,
+    and additionally mints a short-lived HMAC-signed **ticket**
+    (`lib/ChunkRelayTicket.php`) authorizing the Worker to relay chunks into
+    exactly that session — the ticket embeds the session URI itself, so the
+    Worker needs no Google credentials of its own (Drive's session URI is
+    already a self-authenticating capability token; notice
+    `GoogleDriveClient::uploadChunk`/`queryResumableProgress` never send an
+    `Authorization` header to it, only `createResumableSession` does).
+  - The browser (`uploadLargeWithProgress` in `src/api.ts`) slices the file
+    into 16MB chunks and `PUT`s each one straight to the Worker
+    (`CHUNK_RELAY_WORKER_URL`, not `API_BASE`) with `Authorization: Bearer
+    <ticket>`; the Worker relays it to Drive server-to-server (no CORS on that
+    hop) and streams the body through without buffering.
+  - `POST /file-uploads/{id}/finalize` (`file_uploads_finalize`): called once
+    the last chunk reports done. **Never trusts the client-supplied
+    `driveFileId` at face value** — independently re-fetches it from Drive
+    (`GoogleDriveClient::getFileMeta`) and checks size + parent folder match
+    before writing the `files` row, since the Worker (and anything the browser
+    forwards from it) sits outside our own auth boundary.
+  - `GET /file-uploads/{id}` (`file_uploads_status`) is unchanged in spirit —
+    still asks Drive directly for real progress via
+    `GoogleDriveClient::queryResumableProgress` — but now also mints and
+    returns a **fresh** ticket on every call, since a long-running/resumed
+    upload can outlive the original one.
+  - `filesApi.createWithProgress()` still switches to this whole path
+    automatically above `LARGE_UPLOAD_THRESHOLD_BYTES` (80MB); its public
+    signature (`Promise<{file, driveSyncOk}>`) is unchanged, so nothing calling
+    it needed to change. See `cloudflare-worker/README.md` for deploy steps —
+    if `CHUNK_RELAY_WORKER_URL` (`src/api.ts`) and the Worker's actual deployed
+    URL ever drift apart, every large upload fails outright (visibly, not
+    silently — a network error while checking Content-Length/hitting an
+    unreachable host is not something that could be mistaken for slow-but-working).
 - **Downloads survive very large files too**: `files_download` sets
   `@set_time_limit(0)` (a many-GB download can outlast PHP's default limit on
   an ordinary connection) and forwards an incoming `Range` header straight to
@@ -520,7 +547,12 @@ it; don't assume frontend changes are backed up anywhere until then.
     not a raw bandwidth ceiling — the two look similar as user reports
     ("uploads are slow") but need completely different fixes, and this
     session burned real time initially misattributing this one to Drive's
-    API instead of the hosting account's inbound path).
+    API instead of the hosting account's inbound path). **Update:** Natro
+    support later confirmed this cap is a fixed shared-hosting policy, not
+    something they'll lift — the actual fix that shipped is the Cloudflare
+    Worker relay described in "Large file uploads" above, which routes chunk
+    bytes around this server entirely rather than trying to widen the pipe
+    into it.
 
 16. **Safari's `<video>` needs a real Range/206 response to play at all** —
     Chrome/Firefox tolerate a single 200-with-the-whole-body response, Safari

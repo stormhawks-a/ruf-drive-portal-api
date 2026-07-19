@@ -2,12 +2,18 @@
 
 /**
  * Chunked/resumable upload for very large files (100MB+, up to tens of GB).
- * The browser slices the file into fixed-size chunks and PUTs them one at a
- * time; this server never buffers more than one chunk in memory and forwards
- * each straight through to a Google Drive resumable upload session. If a
- * chunk PUT fails partway through (dropped connection etc.), the client
- * re-queries /file-uploads/{id} to find out how many bytes Drive actually has
- * and resumes from there instead of restarting the whole file.
+ * The browser slices the file into fixed-size chunks, but — unlike a plain
+ * relay — PUTs each one straight to a Cloudflare Worker (cloudflare-worker/),
+ * not to this server, because this hosting account's inbound bandwidth is
+ * hard-capped (~1.8-1.9MB/s, confirmed by Natro support as a fixed shared-
+ * hosting limit) while browser<->Drive and server<->Drive are both an order of
+ * magnitude faster. This file only ever handles the small control-plane calls
+ * (start a Drive resumable session, check status, finalize) — never the bulk
+ * bytes themselves. `file_uploads_start` mints a signed ticket (see
+ * ChunkRelayTicket) authorizing the Worker to relay chunks into exactly one
+ * Drive resumable session; `file_uploads_finalize` independently re-verifies
+ * with Drive itself (never trusting the client's say-so) before writing the
+ * `files` row.
  */
 
 function file_uploads_start(array $params): void
@@ -38,14 +44,19 @@ function file_uploads_start(array $params): void
         [$id, $parentId, $user['id'], $name, $mimeType, $totalBytes, $sessionUri]
     );
 
-    Response::json(['uploadId' => $id], 201);
+    $ticket = ChunkRelayTicket::mint($id, $sessionUri, $totalBytes);
+    Response::json(['uploadId' => $id, 'ticket' => $ticket], 201);
 }
 
-function file_uploads_chunk(array $params): void
+/**
+ * Called by the browser once the Worker reports every chunk delivered. Never
+ * trusts $driveFileId at face value — re-fetches it from Drive itself and
+ * checks size + parent folder before writing the `files` row, because the
+ * Worker (and therefore whatever the browser forwards from it) is outside our
+ * own auth boundary. Idempotent: safe to call twice for the same upload.
+ */
+function file_uploads_finalize(array $params): void
 {
-    // Must allow at least as long as GoogleDriveClient::uploadChunk's own 1800s
-    // curl timeout — otherwise PHP would kill the request first regardless.
-    @set_time_limit(1800);
     $user = Auth::requireAuth();
     $id = $params['id'];
     $upload = Db::queryOne('SELECT * FROM file_uploads WHERE id = ?', [$id]);
@@ -55,44 +66,39 @@ function file_uploads_chunk(array $params): void
     if ($upload['owner_id'] !== $user['id']) {
         Response::error('Yetkiniz yok.', 403);
     }
-    if ($upload['status'] !== 'uploading') {
-        Response::json(['done' => $upload['status'] === 'completed', 'bytesReceived' => (int) $upload['bytes_received']]);
-        return;
+
+    if ($upload['status'] === 'completed') {
+        $existing = Db::queryOne('SELECT * FROM files WHERE drive_file_id = ?', [$upload['drive_file_id']]);
+        if ($existing !== null) {
+            Response::json(['file' => $existing]);
+            return;
+        }
     }
 
-    $start = isset($_SERVER['HTTP_X_CHUNK_START']) ? (int) $_SERVER['HTTP_X_CHUNK_START'] : -1;
-    if ($start < 0) {
-        Response::error('X-Chunk-Start başlığı zorunlu.', 422);
+    $body = Response::body();
+    $driveFileId = trim((string) ($body['driveFileId'] ?? ''));
+    if ($driveFileId === '') {
+        Response::error('driveFileId zorunlu.', 422);
+    }
+    if ($upload['drive_file_id'] !== null && $upload['drive_file_id'] !== $driveFileId) {
+        Response::error('Bu yükleme oturumu zaten farklı bir dosyayla tamamlanmış.', 409);
     }
 
-    // Already applied — client is retrying after a response it never saw. Just
-    // report current state instead of sending these bytes to Drive a second time.
-    if ($start < (int) $upload['bytes_received']) {
-        Response::json(['done' => false, 'bytesReceived' => (int) $upload['bytes_received']]);
-        return;
-    }
-    if ($start > (int) $upload['bytes_received']) {
-        Response::error('Beklenmeyen parça sırası, yükleme durumunu tekrar sorgulayın.', 409);
-    }
-
-    $chunkData = file_get_contents('php://input');
-    if ($chunkData === false || $chunkData === '') {
-        Response::error('Parça verisi boş.', 422);
-    }
+    $folder = Db::queryOne('SELECT drive_folder_id FROM folders WHERE id = ?', [$upload['parent_id']]);
+    $driveParentId = $folder['drive_folder_id'] ?? null;
 
     try {
-        $result = GoogleDriveClient::uploadChunk($upload['drive_session_uri'], $chunkData, $start, (int) $upload['total_bytes']);
+        $meta = GoogleDriveClient::getFileMeta($driveFileId, 'id,size,parents');
     } catch (Throwable $e) {
-        error_log('Buyuk dosya parca yuklemesi basarisiz: ' . $e->getMessage());
-        Response::error('Parça yüklenemedi, tekrar deneyin.', 502);
+        error_log('Buyuk dosya finalize dogrulamasi basarisiz: ' . $e->getMessage());
+        Response::error('Yükleme Drive üzerinde doğrulanamadı, henüz tamamlanmamış olabilir.', 502);
     }
-    unset($chunkData);
 
-    Db::execute('UPDATE file_uploads SET bytes_received = ? WHERE id = ?', [$result['bytesReceived'], $id]);
-
-    if (!$result['done']) {
-        Response::json(['done' => false, 'bytesReceived' => $result['bytesReceived']]);
-        return;
+    if ((int) ($meta['size'] ?? -1) !== (int) $upload['total_bytes']) {
+        Response::error('Yüklenen dosyanın boyutu beklenenle eşleşmiyor.', 409);
+    }
+    if ($driveParentId !== null && !in_array($driveParentId, $meta['parents'] ?? [], true)) {
+        Response::error('Yüklenen dosya beklenen klasörde değil.', 409);
     }
 
     $fileId = Ids::generate('file');
@@ -100,14 +106,14 @@ function file_uploads_chunk(array $params): void
         'INSERT INTO files (id, name, original_name, size_bytes, mime_type, file_type, parent_id, owner_id, drive_file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [
             $fileId, $upload['name'], $upload['name'], $upload['total_bytes'], $upload['mime_type'],
-            files_infer_type($upload['name'], (string) $upload['mime_type']), $upload['parent_id'], $user['id'], $result['fileId'],
+            files_infer_type($upload['name'], (string) $upload['mime_type']), $upload['parent_id'], $user['id'], $driveFileId,
         ]
     );
-    Db::execute('UPDATE file_uploads SET status = ?, drive_file_id = ? WHERE id = ?', ['completed', $result['fileId'], $id]);
+    Db::execute('UPDATE file_uploads SET status = ?, drive_file_id = ?, bytes_received = total_bytes WHERE id = ?', ['completed', $driveFileId, $id]);
     AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_UPLOAD', "Dosya eklendi: {$upload['name']}");
 
     $row = Db::queryOne('SELECT * FROM files WHERE id = ?', [$fileId]);
-    Response::json(['done' => true, 'bytesReceived' => $result['bytesReceived'], 'file' => $row]);
+    Response::json(['file' => $row]);
 }
 
 function file_uploads_status(array $params): void
@@ -140,7 +146,15 @@ function file_uploads_status(array $params): void
         $file = Db::queryOne('SELECT * FROM files WHERE drive_file_id = ?', [$upload['drive_file_id']]);
     }
 
-    Response::json(['status' => $upload['status'], 'bytesReceived' => $bytesReceived, 'file' => $file]);
+    // A fresh ticket every time this is polled — the original one from
+    // file_uploads_start has a long but finite lifetime (see ChunkRelayTicket),
+    // and a resumed multi-day upload of a very large file could otherwise stall
+    // once it expires with no way for the browser to get a new one.
+    $ticket = $upload['status'] === 'uploading'
+        ? ChunkRelayTicket::mint($id, $upload['drive_session_uri'], (int) $upload['total_bytes'])
+        : null;
+
+    Response::json(['status' => $upload['status'], 'bytesReceived' => $bytesReceived, 'file' => $file, 'ticket' => $ticket]);
 }
 
 function file_uploads_cancel(array $params): void
@@ -160,7 +174,7 @@ function file_uploads_cancel(array $params): void
 
 return [
     ['POST', '#^/file-uploads$#', 'file_uploads_start'],
-    ['PUT', '#^/file-uploads/(?P<id>[a-zA-Z0-9_]+)/chunk$#', 'file_uploads_chunk'],
+    ['POST', '#^/file-uploads/(?P<id>[a-zA-Z0-9_]+)/finalize$#', 'file_uploads_finalize'],
     ['GET', '#^/file-uploads/(?P<id>[a-zA-Z0-9_]+)$#', 'file_uploads_status'],
     ['DELETE', '#^/file-uploads/(?P<id>[a-zA-Z0-9_]+)$#', 'file_uploads_cancel'],
 ];

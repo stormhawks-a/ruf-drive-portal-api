@@ -17,6 +17,11 @@ return [
     // sifre — gercek bir oturum degil, sadece bu tek endpoint'i disaridan
     // korumak icin. Uretmek icin: php -r "echo bin2hex(random_bytes(16));"
     'cron_secret' => 'CHANGE_ME_RANDOM_TOKEN',
+    // Buyuk dosya parcalarini Cloudflare Worker'a (cloudflare-worker/) rolemekte
+    // kullanilan imzali "ticket"i HMAC-SHA256 ile imzalamak icin — app_secret'tan
+    // BAGIMSIZ olmali (Worker tarafindaki "wrangler secret put CHUNK_RELAY_SECRET"
+    // ile BIREBIR AYNI deger olmali). Uretmek icin: php -r "echo bin2hex(random_bytes(32));"
+    'chunk_relay_secret' => 'CHANGE_ME_32_BYTE_HEX_KEY',
     'session_name' => 'ruf_session',
     // Prod'da mutlaka true olmali (HTTPS zorunlu). Sadece yerel http test icin false.
     'secure_cookies' => true,
