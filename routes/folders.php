@@ -282,6 +282,131 @@ function folders_copy(array $params): void
     ], 201);
 }
 
+/**
+ * Recursively walks the REAL Drive subtree under $driveFolderId (the mirror of
+ * $appFolderId) looking for anything Drive has that our DB doesn't yet — the
+ * opposite direction of every other sync in this app (DB -> DRIVE). Matches
+ * purely on drive_folder_id/drive_file_id (never name), so re-running this is
+ * always safe and never creates a duplicate. Only ever INSERTs; never touches
+ * an existing row and never deletes/soft-deletes anything a Drive-side trash
+ * or removal would otherwise imply — that stays exclusively the app's own
+ * trash/permanent-delete flow. Recurses into every subfolder, whether it
+ * already existed in our DB or was just created in this same call, so a
+ * brand-new subfolder's own brand-new children are found too. Google
+ * Workspace native files (Docs/Sheets/Slides/Forms/Drawings — no real binary
+ * this app's download pipeline can ever stream) are skipped and counted
+ * rather than given a files row that could never actually be opened.
+ */
+function folders_sync_from_drive_subtree(
+    string $appFolderId,
+    string $driveFolderId,
+    array $actingUser,
+    array &$createdFolders,
+    array &$createdFiles,
+    int &$skippedNativeCount,
+    int $depth = 0
+): void {
+    if ($depth >= 200) {
+        return;
+    }
+
+    $children = GoogleDriveClient::listFolderChildren($driveFolderId);
+
+    foreach ($children as $child) {
+        if ($child['mimeType'] === 'application/vnd.google-apps.folder') {
+            $existing = Db::queryOne('SELECT id FROM folders WHERE drive_folder_id = ?', [$child['id']]);
+            if ($existing !== null) {
+                $childAppFolderId = $existing['id'];
+            } else {
+                $childAppFolderId = Ids::generate('folder');
+                Db::execute(
+                    'INSERT INTO folders (id, name, parent_id, drive_folder_id) VALUES (?, ?, ?, ?)',
+                    [$childAppFolderId, $child['name'], $appFolderId, $child['id']]
+                );
+                $createdFolders[] = Db::queryOne('SELECT * FROM folders WHERE id = ?', [$childAppFolderId]);
+            }
+            folders_sync_from_drive_subtree(
+                $childAppFolderId,
+                $child['id'],
+                $actingUser,
+                $createdFolders,
+                $createdFiles,
+                $skippedNativeCount,
+                $depth + 1
+            );
+            continue;
+        }
+
+        if (str_starts_with($child['mimeType'], 'application/vnd.google-apps.')) {
+            // Google Docs/Sheets/Slides/Forms/Drawings etc. — no real bytes to
+            // stream, this app's download/preview pipeline has nowhere to send
+            // a request for these; skip rather than create a files row nothing
+            // could ever open.
+            $skippedNativeCount++;
+            continue;
+        }
+
+        $existingFile = Db::queryOne('SELECT id FROM files WHERE drive_file_id = ?', [$child['id']]);
+        if ($existingFile !== null) {
+            continue;
+        }
+
+        $newFileId = Ids::generate('file');
+        $mimeType = $child['mimeType'] ?? 'application/octet-stream';
+        $fileType = files_infer_type($child['name'], $mimeType);
+        Db::execute(
+            'INSERT INTO files (id, name, original_name, size_bytes, mime_type, file_type, parent_id, owner_id, drive_file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [$newFileId, $child['name'], $child['name'], (int) ($child['size'] ?? 0), $mimeType, $fileType, $appFolderId, $actingUser['id'], $child['id']]
+        );
+        $createdFiles[] = Db::queryOne('SELECT * FROM files WHERE id = ?', [$newFileId]);
+    }
+}
+
+/**
+ * Called when the admin has been uploading files (and/or creating subfolders)
+ * directly in Google Drive's own web UI — to avoid this app's own upload
+ * pipeline entirely — and wants those changes reflected here. ADMIN-only:
+ * this mutates the DB from external, unreviewed Drive state, so it's a
+ * deliberately higher bar than the regular staff-level folder actions.
+ */
+function folders_sync_from_drive(array $params): void
+{
+    $user = Auth::requireRole('ADMIN');
+    $id = $params['id'];
+    $folder = Db::queryOne('SELECT * FROM folders WHERE id = ? AND deleted_at IS NULL', [$id]);
+    if ($folder === null) {
+        Response::error('Klasör bulunamadı.', 404);
+    }
+    if ($folder['drive_folder_id'] === null) {
+        Response::error('Bu klasörün henüz bir Drive karşılığı yok.', 422);
+    }
+
+    // A Drive tree with many nested files/folders means many sequential list
+    // calls — same reasoning as folders_copy's own set_time_limit(0) call.
+    @set_time_limit(0);
+
+    $createdFolders = [];
+    $createdFiles = [];
+    $skippedNativeCount = 0;
+    folders_sync_from_drive_subtree($id, $folder['drive_folder_id'], $user, $createdFolders, $createdFiles, $skippedNativeCount);
+
+    AuditLogger::log(
+        $user['id'],
+        $user['name'],
+        $user['role'],
+        'DRIVE_SYNC',
+        "Drive ile senkronize edildi: {$folder['name']} (" . count($createdFolders) . " klasör, "
+            . count($createdFiles) . " dosya eklendi, {$skippedNativeCount} native Drive dosyası atlandı)"
+    );
+
+    Response::json([
+        'folder' => $folder,
+        'allFolders' => $createdFolders,
+        'allFiles' => $createdFiles,
+        'skippedNativeCount' => $skippedNativeCount,
+    ]);
+}
+
 function folders_delete(array $params): void
 {
     $user = Auth::currentUser() ?? shared_links_resolve_acting_user();
@@ -478,4 +603,5 @@ return [
     ['POST', '#^/folders/(?P<id>[a-zA-Z0-9_]+)/restore$#', 'folders_restore'],
     ['POST', '#^/folders/(?P<id>[a-zA-Z0-9_]+)/register-download$#', 'folders_register_download'],
     ['POST', '#^/folders/(?P<id>[a-zA-Z0-9_]+)/copy$#', 'folders_copy'],
+    ['POST', '#^/folders/(?P<id>[a-zA-Z0-9_]+)/sync-from-drive$#', 'folders_sync_from_drive'],
 ];
