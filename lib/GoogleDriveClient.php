@@ -277,37 +277,6 @@ final class GoogleDriveClient
     }
 
     /**
-     * Lists the immediate (non-recursive) children of a Drive folder — id, name,
-     * mimeType, and size for every file/folder directly inside it, trashed items
-     * excluded. Used by routes/folders.php's Drive->DB sync (the reverse of every
-     * other sync in this app, which is DB->Drive) to discover anything created
-     * directly in Drive's own UI that our database doesn't know about yet. Drive
-     * caps each files.list page at ~1000 results and returns further pages via
-     * nextPageToken — this loops until it's absent so a folder with many
-     * children is never silently truncated to page one.
-     */
-    public static function listFolderChildren(string $folderId): array
-    {
-        $all = [];
-        $pageToken = null;
-        do {
-            $params = [
-                'q' => "'" . str_replace("'", "\\'", $folderId) . "' in parents and trashed = false",
-                'fields' => 'nextPageToken, files(id, name, mimeType, size)',
-                'pageSize' => 1000,
-                'spaces' => 'drive',
-            ];
-            if ($pageToken !== null) {
-                $params['pageToken'] = $pageToken;
-            }
-            $response = self::request('GET', self::API_BASE . '/files?' . http_build_query($params));
-            $all = array_merge($all, $response['files'] ?? []);
-            $pageToken = $response['nextPageToken'] ?? null;
-        } while ($pageToken !== null);
-        return $all;
-    }
-
-    /**
      * Streams Drive's own pre-generated thumbnail (a small JPEG, regardless of the
      * original format) instead of the full original file — used for in-app previews
      * of jpg/png so large photos load fast; the real download endpoint still streams
