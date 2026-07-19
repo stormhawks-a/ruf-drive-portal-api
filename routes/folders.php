@@ -336,6 +336,12 @@ function folders_delete(array $params): void
     leaving no chance to look up their drive_folder_id/drive_file_id afterward). */
 function folders_permanent_delete(array $params): void
 {
+    // Same reasoning as files_permanent_delete: this can call Drive once per
+    // descendant file/folder, and a single large file among them can make the
+    // whole request run long enough to hit PHP's default execution-time cap —
+    // remove that extra timer so a slow-but-fine delete doesn't get killed
+    // mid-request and come back as a raw 500 with nothing actually deleted.
+    @set_time_limit(0);
     $user = Auth::requireRole('ADMIN');
     $id = $params['id'];
     $folder = Db::queryOne('SELECT * FROM folders WHERE id = ?', [$id]);

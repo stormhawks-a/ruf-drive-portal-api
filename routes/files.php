@@ -392,6 +392,17 @@ function files_delete(array $params): void
     active file), same guard the 30-day auto-purge in routes/trash.php relies on. */
 function files_permanent_delete(array $params): void
 {
+    // A very large Drive file can genuinely take Drive longer to acknowledge a
+    // delete than PHP's default execution-time cap allows — same reasoning as
+    // files_download's own @set_time_limit(0). Without this, PHP kills the
+    // script mid-request on a slow-but-otherwise-fine delete, producing a raw
+    // (non-JSON) 500 the frontend can only report as a generic "İstek
+    // başarısız oldu (500)" — and since that kill happens before the DB DELETE
+    // even runs, the file is left behind, looking like "nothing happened"
+    // despite the wait. The Drive call itself is still bounded by its own
+    // curl timeout (GoogleDriveClient::request, 30s) and swallowed by the
+    // try/catch below either way; this only removes PHP's own extra timer.
+    @set_time_limit(0);
     $user = Auth::requireRole('ADMIN');
     $id = $params['id'];
     $file = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
