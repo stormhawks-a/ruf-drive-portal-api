@@ -119,15 +119,22 @@ it; don't assume frontend changes are backed up anywhere until then.
     `GoogleDriveClient::queryResumableProgress` — but now also mints and
     returns a **fresh** ticket on every call, since a long-running/resumed
     upload can outlive the original one.
-  - `filesApi.createWithProgress()` routes every non-empty file through this
-    whole path now — originally gated behind an 80MB threshold, but a folder
-    full of many ordinary-sized files (photos, documents, all individually
-    under that old threshold) would still proxy every one of them through
-    Natro's slow leg otherwise, which is most real deliveries, not an edge
-    case. Only a genuinely empty (0-byte) file still takes the old single
-    multipart POST (the chunked loop has nothing to PUT for zero bytes). Its
-    public signature (`Promise<{file, driveSyncOk}>`) is unchanged, so nothing
-    calling it needed to change. See `cloudflare-worker/README.md` for deploy steps —
+  - `filesApi.createWithProgress()` still switches to this whole path
+    automatically above `LARGE_UPLOAD_THRESHOLD_BYTES` (80MB); its public
+    signature (`Promise<{file, driveSyncOk}>`) is unchanged, so nothing calling
+    it needed to change. **Do not lower/remove this threshold to "fix" many-
+    small-files-in-a-folder feeling slow** — tried exactly that on 2026-07-19
+    and it was a severe regression: the chunked/Worker path costs 3 sequential
+    round trips per file (open Drive session, PUT chunk, verify+finalize)
+    versus 1 for the old direct multipart POST. That overhead is paid once for
+    a single large file and bandwidth dominates, but multiplies across every
+    file in a folder of many small ones — on a high-latency (e.g. mobile)
+    connection this can be far worse than the original Natro bandwidth cap it
+    was meant to fix (observed: a 400MB folder of small files dropped to
+    20-30KB/s). If this needs revisiting, pick a threshold from real
+    round-trip-vs-bandwidth breakeven math and verify with an actual
+    many-small-files test before shipping. See `cloudflare-worker/README.md`
+    for deploy steps —
     if `CHUNK_RELAY_WORKER_URL` (`src/api.ts`) and the Worker's actual deployed
     URL ever drift apart, every large upload fails outright (visibly, not
     silently — a network error while checking Content-Length/hitting an
