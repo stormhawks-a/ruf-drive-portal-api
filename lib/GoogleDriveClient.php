@@ -157,6 +157,9 @@ final class GoogleDriveClient
      */
     public static function uploadFileStreaming(string $sessionUri, $inputStream, int $totalBytes): string
     {
+        if ($totalBytes <= 0) {
+            throw new RuntimeException('Gecersiz dosya boyutu: akis yuklemesi en az 1 bayt gerektirir.');
+        }
         $ch = curl_init($sessionUri);
         curl_setopt_array($ch, [
             CURLOPT_PUT => true,
