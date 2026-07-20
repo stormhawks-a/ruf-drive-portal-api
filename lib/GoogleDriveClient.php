@@ -147,6 +147,44 @@ final class GoogleDriveClient
     }
 
     /**
+     * Drive'a giden tarafi gercek akis (streaming) haline getirir — tarayicidan
+     * gelen baytlar $inputStream'den okundukca, curl'un kendi ic okuma
+     * mekanizmasiyla (CURLOPT_INFILE), PHP'nin dosyanin tamamini bellekte/diskte
+     * tutmasina gerek kalmadan Drive'a akitilir. createResumableSession()'in
+     * actigi oturuma karsi TEK bir PUT yapar (uploadChunk()'in aksine, parcalara
+     * bolmez) — cunku burada tum icerik zaten TEK bir gelen HTTP istegi icinde,
+     * tek seferde aktarilmasi gereken bir akis.
+     */
+    public static function uploadFileStreaming(string $sessionUri, $inputStream, int $totalBytes): string
+    {
+        $ch = curl_init($sessionUri);
+        curl_setopt_array($ch, [
+            CURLOPT_PUT => true,
+            CURLOPT_INFILE => $inputStream,
+            CURLOPT_INFILESIZE => $totalBytes,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 1800,
+            CURLOPT_HTTPHEADER => [
+                'Content-Range: bytes 0-' . ($totalBytes - 1) . '/' . $totalBytes,
+                'Content-Length: ' . $totalBytes,
+            ],
+        ]);
+        $response = curl_exec($ch);
+        if ($response === false) {
+            $err = curl_error($ch);
+            curl_close($ch);
+            throw new RuntimeException('Drive akis yuklemesi basarisiz: ' . $err);
+        }
+        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        $data = json_decode((string) $response, true);
+        if ($status >= 400 || !isset($data['id'])) {
+            throw new RuntimeException('Drive akis yuklemesi basarisiz (HTTP ' . $status . '): ' . $response);
+        }
+        return $data['id'];
+    }
+
+    /**
      * Asks Drive how many bytes of a resumable session it has actually persisted —
      * used to recover the true resume point if our own bytes_received bookkeeping
      * ever falls behind (e.g. the PHP process died right after Drive accepted a
