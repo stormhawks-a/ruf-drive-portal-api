@@ -97,6 +97,62 @@ function files_create(array $params): void
     Response::json(['file' => $row, 'driveSyncOk' => $driveFileId !== null], 201);
 }
 
+/** POST /files/stream — kucuk dosyanin AYNI istek icinde, ham govde olarak, Drive'a
+    dogrudan akitildigi yol. files_create()'in aksine dosyayi hicbir noktada tamamen
+    bellege/diske almaz (bkz. GoogleDriveClient::uploadFileStreaming). Metadata query
+    string'de tasinir (form degil, boylece PHP govdeyi $_FILES'a otomatik bufferlamiyor
+    ve php://input bize bozulmamis kaliyor); govde dogrudan dosya baytlaridir. */
+function files_create_streaming(array $params): void
+{
+    $user = Auth::requireAuth();
+
+    $parentId = trim((string) ($_GET['parentId'] ?? ''));
+    $name = trim((string) ($_GET['name'] ?? ''));
+    $mimeType = (string) ($_GET['mimeType'] ?? 'application/octet-stream');
+    $totalBytes = (int) ($_GET['totalBytes'] ?? 0);
+
+    if ($parentId === '' || $name === '') {
+        Response::error('Klasör ve dosya adı zorunlu.', 422);
+    }
+    if ($totalBytes <= 0) {
+        Response::error('Geçersiz dosya boyutu.', 422);
+    }
+    Scope::assertFolderAccessible($user, $parentId);
+
+    $driveParent = Db::queryOne('SELECT drive_folder_id FROM folders WHERE id = ?', [$parentId]);
+    $driveParentId = $driveParent['drive_folder_id'] ?? null;
+    if ($driveParentId === null) {
+        Response::error('Klasörün Drive bağlantısı yok.', 502);
+    }
+
+    try {
+        $sessionUri = GoogleDriveClient::createResumableSession($name, $driveParentId, $mimeType, $totalBytes);
+        $inputStream = fopen('php://input', 'rb');
+        if ($inputStream === false) {
+            throw new RuntimeException('Yükleme akışı açılamadı.');
+        }
+        try {
+            $driveFileId = GoogleDriveClient::uploadFileStreaming($sessionUri, $inputStream, $totalBytes);
+        } finally {
+            fclose($inputStream);
+        }
+    } catch (Throwable $e) {
+        error_log('Drive akis yuklemesi basarisiz: ' . $e->getMessage());
+        Response::error('Dosya yüklenemedi, tekrar deneyin.', 502);
+    }
+
+    $fileType = files_infer_type($name, $mimeType);
+    $id = Ids::generate('file');
+    Db::execute(
+        'INSERT INTO files (id, name, original_name, size_bytes, mime_type, file_type, parent_id, owner_id, drive_file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [$id, $name, $name, $totalBytes, $mimeType, $fileType, $parentId, $user['id'], $driveFileId]
+    );
+    AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_UPLOAD', "Dosya eklendi: {$name}");
+
+    $row = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
+    Response::json(['file' => $row, 'driveSyncOk' => true], 201);
+}
+
 function files_download(array $params): void
 {
     $id = $params['id'];
@@ -536,6 +592,7 @@ function files_download_stats_reset(array $params): void
 return [
     ['GET', '#^/files$#', 'files_list'],
     ['POST', '#^/files$#', 'files_create'],
+    ['POST', '#^/files/stream$#', 'files_create_streaming'],
     ['GET', '#^/files/download-stats$#', 'files_download_stats'],
     ['DELETE', '#^/files/download-stats$#', 'files_download_stats_reset'],
     ['GET', '#^/files/(?P<id>[a-zA-Z0-9_]+)/download$#', 'files_download'],
