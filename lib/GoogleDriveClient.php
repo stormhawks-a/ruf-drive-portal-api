@@ -100,6 +100,43 @@ final class GoogleDriveClient
     }
 
     /**
+     * Same as createResumableSession(), but opens the session against an EXISTING
+     * file id (PATCH instead of POST, no name/parents in the metadata body — this
+     * only ever replaces the file's bytes, never its name or location) — used by
+     * the upload-conflict "Üzerine Yaz" resolution to genuinely overwrite a file
+     * in place (same id, same download-count history) instead of trashing the old
+     * row and creating a new one. The returned session URI is PUT-compatible with
+     * the exact same uploadChunk()/uploadFileStreaming() calls as a create session.
+     */
+    public static function createResumableUpdateSession(string $fileId, string $mimeType, int $totalBytes): string
+    {
+        $ch = curl_init(self::UPLOAD_BASE . '/files/' . urlencode($fileId) . '?uploadType=resumable&fields=id');
+        curl_setopt_array($ch, [
+            CURLOPT_CUSTOMREQUEST => 'PATCH',
+            CURLOPT_POSTFIELDS => json_encode((object) []),
+            CURLOPT_HEADER => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER => [
+                'Authorization: Bearer ' . GoogleOAuth::getAccessToken(),
+                'Content-Type: application/json; charset=UTF-8',
+                'X-Upload-Content-Type: ' . $mimeType,
+                'X-Upload-Content-Length: ' . $totalBytes,
+            ],
+        ]);
+        $response = curl_exec($ch);
+        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        if ($response === false || $status >= 400) {
+            throw new RuntimeException('Drive guncelleme oturumu baslatilamadi (HTTP ' . $status . ').');
+        }
+        $headers = substr($response, 0, $headerSize);
+        if (!preg_match('/^Location:\s*(\S+)/mi', $headers, $m)) {
+            throw new RuntimeException('Drive oturum adresi alinamadi.');
+        }
+        return trim($m[1]);
+    }
+
+    /**
      * PUTs one chunk of a resumable session. $start is this chunk's byte offset in
      * the overall file. Returns bytesReceived (Drive's own count, read back from its
      * response — never assumed) and, once Drive has every byte, the finished file id.

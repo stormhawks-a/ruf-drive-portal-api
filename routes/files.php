@@ -159,6 +159,80 @@ function files_create_streaming(array $params): void
     Response::json(['file' => $row, 'driveSyncOk' => true], 201);
 }
 
+/** PUT /files/{id}/content — replaces an EXISTING file's actual bytes in place
+    (same row, same id, same download-count/audit history), instead of the old
+    trash-then-recreate approach. Used by the upload-conflict "Üzerine Yaz"
+    resolution so that restoring the previous version from Çöp Sepeti is no
+    longer even a question — there is no previous version sitting in trash to
+    restore, the same file just has new content. Same query-string-metadata +
+    raw-body streaming shape as files_create_streaming(); the file's name and
+    parent folder never change here, only its content/size/mime type. */
+function files_update_content(array $params): void
+{
+    $user = Auth::currentUser() ?? shared_links_resolve_acting_user();
+    if ($user === null) {
+        Response::error('Oturum açmanız gerekiyor.', 401);
+    }
+    $id = $params['id'];
+    $file = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
+    if ($file === null) {
+        Response::error('Dosya bulunamadı.', 404);
+    }
+    if ($file['deleted_at'] !== null) {
+        Response::error('Çöp kutusundaki bir dosyanın üzerine yazılamaz.', 409);
+    }
+    Scope::assertFolderAccessible($user, $file['parent_id']);
+
+    $mimeType = (string) ($_GET['mimeType'] ?? 'application/octet-stream');
+    $totalBytes = (int) ($_GET['totalBytes'] ?? 0);
+    if ($totalBytes <= 0) {
+        Response::error('Geçersiz dosya boyutu.', 422);
+    }
+
+    try {
+        if ($file['drive_file_id'] !== null) {
+            $sessionUri = GoogleDriveClient::createResumableUpdateSession($file['drive_file_id'], $mimeType, $totalBytes);
+            $driveFileId = $file['drive_file_id'];
+        } else {
+            // The existing row never actually made it to Drive in the first
+            // place (e.g. a past OAuth outage) — nothing to update in place,
+            // so this "overwrite" just creates the Drive object for real now.
+            $driveParent = Db::queryOne('SELECT drive_folder_id FROM folders WHERE id = ?', [$file['parent_id']]);
+            $driveParentId = $driveParent['drive_folder_id'] ?? null;
+            if ($driveParentId === null) {
+                Response::error('Klasörün Drive bağlantısı yok.', 502);
+            }
+            $sessionUri = GoogleDriveClient::createResumableSession($file['name'], $driveParentId, $mimeType, $totalBytes);
+            $driveFileId = null; // filled in below once Drive actually hands one back
+        }
+        $inputStream = fopen('php://input', 'rb');
+        if ($inputStream === false) {
+            throw new RuntimeException('Yükleme akışı açılamadı.');
+        }
+        try {
+            $uploadedFileId = GoogleDriveClient::uploadFileStreaming($sessionUri, $inputStream, $totalBytes);
+        } finally {
+            fclose($inputStream);
+        }
+        if ($driveFileId === null) {
+            $driveFileId = $uploadedFileId;
+        }
+    } catch (Throwable $e) {
+        error_log('Drive uzerine yazma basarisiz: ' . $e->getMessage());
+        Response::error('Dosya güncellenemedi, tekrar deneyin.', 502);
+    }
+
+    $fileType = files_infer_type($file['name'], $mimeType);
+    Db::execute(
+        'UPDATE files SET size_bytes = ?, mime_type = ?, file_type = ?, drive_file_id = ? WHERE id = ?',
+        [$totalBytes, $mimeType, $fileType, $driveFileId, $id]
+    );
+    AuditLogger::log($user['id'], $user['name'], $user['role'], 'FILE_UPLOAD', "Dosya üzerine yazılarak güncellendi: {$file['name']}");
+
+    $row = Db::queryOne('SELECT * FROM files WHERE id = ?', [$id]);
+    Response::json(['file' => $row, 'driveSyncOk' => true], 200);
+}
+
 function files_download(array $params): void
 {
     $id = $params['id'];
@@ -189,6 +263,18 @@ function files_download(array $params): void
     // asked for, just a peek, so it must never log FILE_DOWNLOAD or bump
     // either download counter. Only the real download link (no ?inline) does.
     $isInlinePreview = isset($_GET['inline']) && $_GET['inline'] === '1';
+
+    // A real download of an already-trashed file was never meant to be
+    // possible — the UI hides the download button/menu item the whole time
+    // Çöp Sepeti is open (see effectiveFolderId === 'TRASH' checks in
+    // DriveInterface.tsx) — but nothing here enforced that server-side, so a
+    // stale client-side selection (or a direct request) could still pull the
+    // bytes of a file that's supposed to be in the trash. Preview (?inline=1)
+    // is left alone since it's a separate, narrower concern (just looking at
+    // a trashed file before deciding to restore it, not exporting a copy).
+    if ($file['deleted_at'] !== null && !$isInlinePreview) {
+        Response::error('Bu dosya çöp kutusunda.', 404);
+    }
 
     // Two ways in: a real logged-in account scoped to this file's folder, or an
     // unlocked share-link session whose shared scope includes this file.
@@ -599,6 +685,7 @@ return [
     ['GET', '#^/files$#', 'files_list'],
     ['POST', '#^/files$#', 'files_create'],
     ['POST', '#^/files/stream$#', 'files_create_streaming'],
+    ['PUT', '#^/files/(?P<id>[a-zA-Z0-9_]+)/content$#', 'files_update_content'],
     ['GET', '#^/files/download-stats$#', 'files_download_stats'],
     ['DELETE', '#^/files/download-stats$#', 'files_download_stats_reset'],
     ['GET', '#^/files/(?P<id>[a-zA-Z0-9_]+)/download$#', 'files_download'],
