@@ -302,18 +302,14 @@ function folders_delete(array $params): void
     // Items already in the trash (deleted independently, earlier) are left alone.
     $descendantIds = folders_collect_descendant_ids($id);
 
-    // Staff browsing into a customer's own folder tree (via the admin dashboard,
-    // not a share link) still gets attributed to that customer in deleted_by —
-    // see Scope::resolveOwningCustomerId's own docblock. A real customer deleting
-    // their own folder, or staff deleting something outside any customer's tree,
-    // is unaffected (owningCustomerId is null there, or equals $user['id']).
+    // deleted_by is always the real acting user — the staff member who clicked
+    // delete (even while browsing INTO a customer's folder), or the customer
+    // themselves when they delete via their own login/share link. Previously
+    // staff deletes inside a customer's tree were re-attributed to that
+    // customer instead (see git history / Scope::resolveOwningCustomerId,
+    // removed) — reversed on explicit request, since it read as "the customer
+    // deleted this" in the trash view when a staff member actually did.
     $deletedById = $user['id'];
-    if ($user['role'] !== 'CUSTOMER') {
-        $owningCustomerId = Scope::resolveOwningCustomerId($id);
-        if ($owningCustomerId !== null) {
-            $deletedById = $owningCustomerId;
-        }
-    }
 
     // NOW() (MySQL's own clock), not PHP's date() — PHP defaults to UTC with no
     // timezone configured anywhere in this app, while MySQL's CURRENT_TIMESTAMP
