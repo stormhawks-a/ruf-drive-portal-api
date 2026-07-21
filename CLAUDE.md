@@ -798,3 +798,30 @@ it; don't assume frontend changes are backed up anywhere until then.
     removed entirely from the customer panel; its only remaining job is
     showing the running count + a clear-selection button, since download and
     share both moved into the sidebar's own controls.
+
+30. **`POST /files/stream`'in gerçek hızı bir Nginx ayarına bağlı, ve bu ayar
+    hiçbir yerde otomatik değil.** 2026-07-21'de eklenen bu endpoint
+    (`files_create_streaming`, bkz. "Large file uploads" bölümünün küçük-dosya
+    muadili) PHP tarafında dosyayı hiç buffer'lamadan `php://input`'tan
+    okuyup Drive'a akıtıyor — ama bu VPS'in Nginx+Apache reverse-proxy
+    zincirinde Nginx, isteğin gövdesini varsayılan olarak (`proxy_request_
+    buffering on`, Nginx'in kendi öntanımlısı) PHP'ye ulaşmadan önce
+    **tamamen** buffer'lıyor, tam olarak PHP tarafında kaldırdığımız sorunu
+    bir kat aşağıda aynen geri getiriyor. Gerçek ölçümde bu fark 3.55MB/s
+    (Nginx buffer'lıyor) ile 5.03MB/s (buffer kapalı) arasında — yani
+    unutulursa uygulama **hatasız çalışmaya devam eder**, sadece sessizce
+    ~%30 yavaşlar, hiçbir log/hata bunu göstermez (bu codebase'in tekrar eden
+    "çalışıyor ama sessizce yavaş" deseni — bkz. gotcha #15). Gerekli tek
+    satır: `proxy_request_buffering off;`, sadece `location = /backend/files/
+    stream` bloğu için (domain geneline değil). Gerçek, kanıtlanmış hâli
+    `api/deploy/nginx-streaming-location.conf`'ta duruyor — VPS migration
+    henüz tamamlanmadığı için (bkz. proje kökündeki `CLAUDE.md`) sunucu bir
+    daha kurulur/HestiaCP alan adı "rebuild" edilirse, bu dosyanın içeriği
+    domain'in `nginx.ssl.conf_*` include mekanizmasına (HestiaCP'nin kendi
+    ürettiği `nginx.ssl.conf`'u doğrudan düzenlemeden) yeniden eklenmeli —
+    aksi hâlde kimse fark etmeden hız sessizce eski seviyesine döner. Aynı
+    aileden ikinci bir risk: bu yol artık `post_max_size`'a da bağımlı
+    (Natro için yazılmış `api/.user.ini`'nin 100M değeri sadece CGI/FastCGI
+    SAPI'de geçerli) — yeni sunucuda daha düşük bir `post_max_size`/mod_php
+    kombinasyonu varsa 80MB'a yakın küçük dosyalar genel bir 502 ile
+    başarısız olur, sebebi buradan bakılmadan anlaşılmaz.

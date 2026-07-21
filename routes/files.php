@@ -101,7 +101,13 @@ function files_create(array $params): void
     dogrudan akitildigi yol. files_create()'in aksine dosyayi hicbir noktada tamamen
     bellege/diske almaz (bkz. GoogleDriveClient::uploadFileStreaming). Metadata query
     string'de tasinir (form degil, boylece PHP govdeyi $_FILES'a otomatik bufferlamiyor
-    ve php://input bize bozulmamis kaliyor); govde dogrudan dosya baytlaridir. */
+    ve php://input bize bozulmamis kaliyor); govde dogrudan dosya baytlaridir.
+    Buyuk-dosya/Worker yolunun aksine (file_uploads_finalize, Drive'dan
+    getFileMeta ile boyutu tekrar dogrular), burada boyut Drive'a tekrar
+    sorulmuyor -- kasitli: bu baytlarin kaynagi zaten kimligi dogrulanmis bir
+    oturum (Worker gibi auth sinirinin DISINDA degil), yani daha zayif bir
+    tehdit modeli. Drive, INFILESIZE'dan az bayt alirsa 308 doner ve istek
+    502 ile basarisiz olur (bozulma degil, sadece basarisiz istek). */
 function files_create_streaming(array $params): void
 {
     $user = Auth::requireAuth();
