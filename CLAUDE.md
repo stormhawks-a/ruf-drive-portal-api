@@ -924,4 +924,109 @@ repo.
     `filesApi.updateContentWithProgress()`'i çağırıyor ve sonucu `createdFiles`
     yerine ayrı bir `updatedFiles` listesine yazıyor — `finally` bloğu
     `updatedFiles`'ı `id` eşleşmesiyle var olan `files` state'ine gömüyor
-    (yeni satır olarak eklemiyor).
+    (yeni satır olarak eklemiyor). **Güncelleme (2026-07-22):** "Üzerine Yaz"
+    butonunun metni ("eskisi çöp kutusuna gider") bu değişiklikten sonra da
+    eskisi gibi kalmıştı — artık doğru şekilde "eski veriler geri
+    döndürülemez" diyor (`UploadConflictDialog.tsx`), çünkü artık gerçekten
+    çöp kutusuna giden bir şey yok.
+
+34. **`files_download` artık çöpteki bir dosyayı asla vermiyor — bu daha önce
+    sadece ön yüzde (UI) gizleniyordu, sunucu tarafında hiçbir engel yoktu.**
+    Çöp Sepeti görünümündeyken indirme butonu/menü öğesi zaten gizleniyordu
+    (`DriveInterface.tsx`'te her yerde `effectiveFolderId !== 'TRASH'`
+    kontrolü), ama bu sadece arayüz seviyesinde bir gizlemeydi — `GET
+    /files/{id}/download`'a doğrudan bir istek (ya da bayatlamış bir
+    seçim durumu, bkz. gotcha altında) hâlâ dosyanın gerçek baytlarını
+    veriyordu. `files_download`'a artık en başta `$file['deleted_at'] !==
+    null && !$isInlinePreview` kontrolü eklendi — `?inline=1` ile önizleme
+    (dosyayı silmeden önce göz atma) kasıtlı olarak etkilenmiyor, sadece
+    gerçek "indir" isteği 404 ile reddediliyor. `zip_download`'un kendi
+    dosya toplama fonksiyonu (`zip_collect_entries`) bunu zaten doğru
+    yapıyordu (`AND deleted_at IS NULL` filtresiyle) — eksik olan tek yer
+    tekil dosya indirme yoluydu.
+
+35. **`deleted_by` artık her zaman gerçek işlemi yapan kullanıcı — klasörün
+    "sahibi" olan müşteriye değil.** Önceki tasarım (`Scope::
+    resolveOwningCustomerId`, artık kaldırıldı) kasıtlıydı: bir personel/
+    editör bir müşterinin klasörü İÇİNDEN bir şey silince, `deleted_by`
+    o müşterinin id'sine ayarlanıyordu — amaç, müşterinin çöp kutusuna
+    bakan birinin "kim sildi" sorusuna kafa karıştırıcı bir personel adı
+    yerine tanıdık bir isim görmesiydi. Kullanıcı (gerçek yönetici hesabıyla
+    test ederken) bunun TAM TERSİNİ istediğini açıkça belirtti: personel/
+    editör ne silerse silsin (nerede olursa olsun) kendi gerçek adı
+    yazmalı, sadece müşteri kendi girişiyle/paylaşım linkiyle kendi
+    klasöründen bir şey silerse o müşterinin adı yazmalı. `files_delete` ve
+    `folders_delete`'teki `$owningCustomerId` ikamesi tamamen kaldırıldı —
+    `deletedById` artık her zaman düz `$user['id']`. Bunun doğal sonucu:
+    Çöp Sepeti'ndeki "Müşteriler" filtre sekmesi artık SADECE müşterilerin
+    kendi eylemleriyle sildiklerini gösteriyor, personelin bir müşteri
+    klasöründen sildiklerini değil (bunlar artık doğru şekilde "Personel"/
+    "Editörler" sekmelerinde görünüyor) — bu, istenen davranışın doğal ve
+    doğru bir sonucu, ayrıca düzeltilmesi gereken bir yan etki değil.
+
+36. **Yükleme/indirme iptali artık native `window.confirm()`/`alert()`
+    kullanmıyor — bu, kullanıcı isteğiyle bilinçli bir tasarım kararı.**
+    `TransferTray.tsx`'in "İptal Et" butonu artık kutunun kendi içinde
+    inline bir "Emin misiniz? [Vazgeç] [Evet, iptal et]" satırına dönüşüyor
+    (`confirmingCancel` state), ve onaylanınca yine kutunun kendi boş
+    (idle) durumu "Yükleme/İndirme iptal edildi." yazıyor
+    (`cancelledUpload`/`cancelledDownload` state) — App.tsx'teki genel hata
+    `alert()`'leri artık gerçek bir iptali ASLA göstermiyor (bkz. gotcha 37
+    ile birlikte okunmalı). Tarayıcının native dialog'ları bu projede
+    kasıtlı olarak "çirkin/güvenilmez" bulunup kaldırıldı — yeni bir
+    onay/bilgilendirme ihtiyacı çıkarsa native `confirm`/`alert` yerine bu
+    aynı in-UI-state deseni tekrar kullanılmalı.
+
+37. **`xhr.abort()`, hiç `.send()` edilmemiş bir XMLHttpRequest üzerinde
+    çağrılırsa `onabort` HİÇ tetiklenmiyor — bu, promise'i sonsuza kadar
+    askıda bırakıp tüm yükleme kuyruğunu (ve tepsiyi) "yükleniyor" durumunda
+    kilitleyen gerçek bir production hatasıydı.** `src/api.ts`'teki
+    `createWithProgress`, bir dosya yeniden denenirken (gotcha 31'deki
+    retry mantığı) tam da kullanıcı "İptal Et"e bastığı anda yeni bir XHR
+    açıyor — `signal.aborted` zaten `true` olduğu için eski kod
+    `xhr.abort(); return;` yapıp promise'i hiç `resolve`/`reject`
+    etmiyordu (spec gereği: `abort()`, `send()` edilmemiş bir istekte
+    "isteği sonlandır" adımlarını hiç çalıştırmıyor, çünkü istek zaten hiç
+    "başlamamış"). Gerçek tarayıcı testiyle bulundu (yerelde bilinen
+    Drive-502 hatasının retry döngüsünü tetiklediği bir senaryoda) —
+    düzeltme: `signal.aborted` zaten true ise `xhr.abort()` çağırmak
+    yerine doğrudan `reject(new UploadCancelled())` çağır. Herhangi bir
+    yeni XHR-tabanlı iptal edilebilir istek eklenirse bu aynı deseni
+    tekrar etmemek gerekir.
+
+38. **Çöpe atılmış (`deletedAt`) bir dosya/klasörü ağaçtan toplayan/boyut
+    hesaplayan HER yer bunu KENDİ BAŞINA filtrelemek zorunda — tek bir
+    merkezi "elek" yok, bu yüzden aynı hata bu oturumda 3 ayrı yerde ayrı
+    ayrı bulunup düzeltildi.** `App.tsx` ve `DriveInterface.tsx`'in kendi
+    ayrı `getFolderSize` kopyaları (müşteri kartındaki toplam boyut) VE
+    `src/lib/folderDownload.ts` (gerçek klasör indirme — `collectFolderEntries`,
+    `allSelectedFolderIds` yürüyüşü, `filesInSelectedFolders`/
+    `directlySelectedFiles`) hiçbiri `!f.deletedAt` kontrolü yapmıyordu —
+    sonuç: silinen dosyaların baytları müşteri kartında hâlâ görünüyordu VE
+    "hepsini indir" çöpteki dosyaları da indirmeye çalışıp (bkz. gotcha 34,
+    sunucu artık bunu reddediyor) ilerleme çubuğunun asla %100'e
+    ulaşmamasına yol açıyordu. Yeni bir dosya/klasör ağacı toplama/
+    hesaplama kodu yazılırsa, `files`/`folders` state'inin HER ZAMAN
+    silinmiş öğeleri de içerdiği (sadece `deletedAt` alanıyla işaretli)
+    unutulmamalı — filtrelemek çağıranın sorumluluğu.
+
+39. **Tailwind'de bir flex elemanına `shrink-0` koymak, o elemanın kendi
+    İÇİNDEKİ `flex-wrap`'in hiçbir faydasını sağlamaz — dıştaki flex satırı
+    onu hâlâ tam (sarmasız) genişliğiyle yerleştirmeye çalışır.** Çöp
+    Sepeti başlığı (`DriveInterface.tsx`, `Global Geri Dönüşüm` bloğu),
+    sekmeler+"Çöp Kutusunu Boşalt" butonunu saran kapsayıcıya hem
+    `flex-wrap` hem `shrink-0` birden verilmişti — `flex-wrap` içeride
+    sarmayı SERBEST bırakıyor ama `shrink-0` dıştaki flex satırına "beni
+    asla küçültme" diyor, yani tarayıcı yine de bu kapsayıcıya sarmasız
+    tam genişliğini veriyor ve `flex-wrap` hiç devreye girmiyor — kardeş
+    eleman (başlık metni) sıkışıp her kelime ayrı satıra düşüyordu.
+    Düzeltme: kapsayıcıdan `shrink-0`'ı kaldırmak (düğmelerin kendisi hâlâ
+    `shrink-0` tutuyor, tek tek sıkışıp okunaksızlaşmasınlar diye) — bu,
+    dıştaki flex satırının kapsayıcıya makul bir genişlik ayırmasına, o
+    genişlik yetmediğinde de `flex-wrap`'in gerçekten devreye girip
+    düğmeleri alt satıra kaydırmasına izin veriyor. Gerçek tarayıcıda 900px
+    ve 390px (gerçek mobil) genişliklerde doğrulandı — ayrıca "Çöp Kutusunu
+    Boşalt" butonunun mobilde bulunamaması da aynı kökün bir belirtisiydi
+    (eski hâlde `overflow-x-auto` + gizli scrollbar vardı, buton görünür
+    alanın dışına taşıyordu, kaydırılması gerektiğine dair hiçbir işaret
+    yoktu).
