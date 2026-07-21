@@ -6,10 +6,11 @@ customers — no `drive.google.com` URLs, no Drive branding, anywhere in a
 customer-facing response.
 
 Repo scope: this is `api/` only. The frontend (`src/`, Vite/React) lives in the
-parent project folder and currently has **no git repository at all** — it's
-deployed by manually building locally and uploading the `dist/` output via
-cPanel File Manager. If that ever needs to change, set up a separate repo for
-it; don't assume frontend changes are backed up anywhere until then.
+parent project folder as its **own separate git repo** (initialized
+2026-07-21, root-level, `api/` deliberately excluded via its `.gitignore` so
+the two never mix). Deploy is still manual either way: frontend by building locally and pushing
+the `dist/` output to the VPS, backend by `git pull` on the VPS from *this*
+repo.
 
 ## Architecture
 
@@ -825,3 +826,102 @@ it; don't assume frontend changes are backed up anywhere until then.
     SAPI'de geçerli) — yeni sunucuda daha düşük bir `post_max_size`/mod_php
     kombinasyonu varsa 80MB'a yakın küçük dosyalar genel bir 502 ile
     başarısız olur, sebebi buradan bakılmadan anlaşılmaz.
+
+31. **`POST /files/stream` tek, parçalanmamış bir HTTP isteğini dosyanın
+    tamamı boyunca açık tutuyor — bu, gerçek dünyada (özellikle birden çok
+    dosya eşzamanlı yüklenirken) ara sıra tek başına başarısız olabiliyor,
+    hiçbir sabit boyut eşiğiyle ilişkili değil.** 2026-07-21'de, gerçek bir
+    162 dosyalık/2.9GB'lık klasör yüklemesinde, 8MB'dan 71MB'a kadar farklı
+    boyutlarda dosyalarda tekrarlayan, tarayıcıda 524 (Cloudflare) olarak
+    görünen ama origin logunda çoğunlukla düz bir Apache "400 Bad Request"
+    (uygulamanın KENDİ `Response::error()`'ından değil — 769 baytlık, sabit,
+    Apache'nin kendi varsayılan hata sayfası) olarak kayıtlı başarısızlıklar
+    görüldü. Araştırıldı ve ELENEN ihtimaller: `post_max_size` (sunucuda zaten
+    2-3GB, sorun değil) ve Apache'nin `RequestReadTimeout body=10,minrate=500`
+    ayarı (canlıda, isteği kasıtlı olarak çok yavaş/25-35 saniye tamamen
+    duraklatarak gönderen kontrollü testler bile başarılı oldu — Cloudflare
+    büyük gövdeleri origin'e iletmeden önce kendi tarafında tamponluyor
+    gibi görünüyor, yani origin gerçek yavaşlığı çoğu zaman hiç görmüyor).
+    VPS CPU'sunun darboğaz olmadığı da doğrulandı (4 eşzamanlı 20MB yükleme
+    sırasında `top` %100 idle gösterdi) — buna rağmen bu testte de aynı aile
+    hatalardan biri (504 Gateway Timeout) hızlı, kararlı bir bağlantıdan bile
+    tekrar üretildi. Net sonuç: kesin tek bir alt-katman sebebi
+    (Apache/Cloudflare/PHP-FPM sınırındaki tam mekanizma) doğrulanamadı, ama
+    mimari risk açık — büyük dosya/Worker yolunun aksine (16MB'lık parçalar,
+    biri başarısız olursa sadece o parça etkilenir) bu yolda parçalama veya
+    tekrar deneme YOK, tek bir uzun bağlantı her şeyi taşıyor. **Düzeltme
+    (kök sebebi tam izole etmek yerine dayanıklılık ekleyerek): `src/App.tsx`
+    `handleAddBatch`'teki `runWorker`, artık her dosyayı en fazla 3 kez dener
+    (1.5sn aralıklarla) ve bir dosya üç denemeden sonra da başarısız olursa
+    ARTIK TÜM KUYRUĞU DURDURMUYOR — sadece o dosyayı başarısız listesine ekleyip
+    devam ediyor, tüm dosyalar bir kez denendikten sonra hâlâ başarısız olanlar
+    için kısa bir bekleme sonrası TEK TEK (concurrency=1) ikinci bir tur daha
+    deniyor, ancak bu ikinci turdan sonra da başarısız kalanları tek bir özet
+    mesajla bildiriyor (bkz. `src/App.tsx` `attemptUpload`/`runPass`).** Gerçek
+    kullanıcı iptali (`UploadCancelled`) hâlâ ayrık tutuluyor — tekrar
+    denenmiyor, tüm kuyruğu hemen durduruyor.
+    Aynı araştırmada gözlemlenen ikinci bulgu — **2026-07-21 içinde aynı gün
+    çözüldü**: eşzamanlı çoklu-dosya yüklemede toplam hız ~1.6-2.4MB/s'de tavan
+    yapıyordu; istemci hızı (20 Mbps ofis bağlantısından bile aynı tavan), VPS
+    CPU'su (idle), origin→Drive ham hızı (izole testte 9.62MB/s, sürdürülen
+    testte 30MB/s'e kadar) bunların HİÇBİRİ açıklamıyordu. Google Drive kota
+    teorisi de test edilip ELENDİ: VPS'in kendi bağlantısından aynı tam yol
+    (Cloudflare → Nginx → Apache → PHP → Drive) tek akışta 10-15MB/s, 4
+    eşzamanlı akışta ~15MB/s'e ulaştı (CPU yine idle) — yani sunucu tarafında
+    hiçbir tavan yok. Kesin kanıt: AYNI iki bağımsız yükleme mimarisi (bu
+    `/files/stream` yolu VE tamamen ayrı >80MB Worker/chunked yolu) gerçek ofis
+    cihazlarından (hem wifi hem ethernet) test edildiğinde ikisi de aynı
+    ~2-2.4MB/s'e çarptı. **Sonuç: darboğaz bu uygulamada, sunucuda, Cloudflare
+    ayarlarında ya da Drive'da değil — istemci cihazının Cloudflare'e olan
+    gerçek ağ yolunda (ISP/routing).** Bizim tarafımızda düzeltilecek bir şey
+    yok, tekrar araştırılmasına gerek yok.
+
+32. **`src/lib/folderDownload.ts` (gerçek, ziplenmemiş klasör indirme —
+    `showDirectoryPicker`) 2026-07-21'e kadar dosyaları TEK TEK, biri bitmeden
+    diğerine geçmeden indiriyordu — bu artık `DOWNLOAD_CONCURRENCY = 4`'lük
+    bir worker-pool'a çevrildi.** Sebep, aynı gün gotcha #31'deki yükleme
+    araştırmasının bir yan ürünü: gerçek bir 3.9GB'lık klasör indirmesinde
+    5MB altı dosyalar ortalama sadece ~1MB/s gösterdi (TCP/TLS "ısınma"
+    süresini geçemeden dosya zaten bitiyor), oysa aynı klasördeki büyükçe
+    dosyalar 7-40MB/s'e ulaşıyordu — yükleme tarafındaki bulgunun aksine
+    (orada ağın kendisi sert bir tavandı, eşzamanlılık pek yardımcı olmuyordu),
+    burada bağlantının gerçekte çok daha hızlı olabildiği açıkça görülüyordu,
+    sadece küçük dosyalarda kullanılamıyordu. Uygulama: `collectFolderEntries`
+    önce tüm ağacı gezip (ucuz, veri taşımaz) gerçek alt klasörleri oluşturuyor
+    ve her dosyayı düz bir kuyruğa (`QueuedEntry[]`) topluyor; asıl indirme
+    (`writeFileEntry`) bu kuyruktan 4 worker ile paralel çekiliyor.
+    `onFolderDownloaded` (bkz. gotcha yukarıda, indirme sayaç mantığı) artık
+    her üst klasör için "kalan dosya sayısı" sayacı sıfırlanınca tetikleniyor,
+    eski koddaki gibi son dosyadan hemen sonra değil — boş bir klasör bu
+    sayaca hiç girmediği için ayrıca, `collectFolderEntries` 0 dosya
+    bulduğunda `onFolderDownloaded` hemen orada çağrılıyor (aksi hâlde hiç
+    tetiklenmez).
+
+33. **"Üzerine Yaz" (upload-conflict Overwrite) artık dosyayı gerçekten yerinde
+    günceller — eskiyi çöpe atıp yenisini ayrı bir satır olarak oluşturmuyor.**
+    2026-07-21'de eklenen ilk sürüm kasıtlı olarak trash-then-recreate
+    yapıyordu (bkz. tasarım notu), ama kullanıcı bunun sonucunda "eskiyi çöp
+    kutusundan geri yüklersem ne olur" gibi kafa karıştırıcı bir durum
+    yarattığını fark etti. Yeni `PUT /files/{id}/content` (`files_update_
+    content`, `routes/files.php`) aynı satırı/`id`'yi koruyarak sadece
+    baytları/`size_bytes`/`mime_type`/`drive_file_id`'yi günceller —
+    `download_count` ve tüm denetim geçmişi aynı kalır, çöp kutusuna hiçbir
+    şey düşmez. `GoogleDriveClient::createResumableUpdateSession()` aynı
+    `createResumableSession()`'ın PATCH'li hâli (POST yerine, `files/{fileId}`
+    üzerinde, `name`/`parents` metadata'sı olmadan) — döndürdüğü oturum
+    URI'si `uploadChunk()`/`uploadFileStreaming()` ile birebir aynı şekilde
+    kullanılabiliyor, ayrı bir yükleme mekanizması gerekmedi. Var olan satırın
+    `drive_file_id`'si NULL ise (ör. geçmiş bir OAuth kesintisinden dolayı hiç
+    Drive'a gitmemiş) sessizce normal bir create-session'a düşüyor — yine aynı
+    satırı güncelliyor, sadece Drive tarafında ilk kez gerçek bir dosya
+    oluşturuyor. **Sadece küçük-dosya eşiğinin (`LARGE_UPLOAD_THRESHOLD_BYTES`,
+    80MB) altındaki dosyalar için** — üstündeki dosyalar hâlâ eski trash-then-
+    recreate davranışını kullanıyor, çünkü >80MB parçalı/Worker yolunun henüz
+    "yerinde güncelleme" karşılığı yok. Frontend tarafında `DriveInterface.tsx`
+    `executeUploadBatch`'in "overwrite" dalı, çakışan girişleri silmek yerine
+    `PendingFileUpload.overwriteFileId` ile işaretliyor; `App.tsx`
+    `handleAddBatch`'teki `attemptUpload` bu alanı görünce
+    `filesApi.updateContentWithProgress()`'i çağırıyor ve sonucu `createdFiles`
+    yerine ayrı bir `updatedFiles` listesine yazıyor — `finally` bloğu
+    `updatedFiles`'ı `id` eşleşmesiyle var olan `files` state'ine gömüyor
+    (yeni satır olarak eklemiyor).
