@@ -1030,3 +1030,72 @@ repo.
     (eski hâlde `overflow-x-auto` + gizli scrollbar vardı, buton görünür
     alanın dışına taşıyordu, kaydırılması gerektiğine dair hiçbir işaret
     yoktu).
+
+40. **Brute-force koruması eklendi (`api/lib/RateLimiter.php`): `/login` ve
+    `/shared-links/{id}/unlock` artık sınırsız deneme kabul etmiyor.** DB'de
+    tek bir tablo (`login_throttle`, sadece `bucket_key` + `created_at`) her
+    başarısız denemeyi bir satır olarak tutuyor; `RateLimiter::guard()` bir
+    bucket'ta son N dakikada M'den fazla satır varsa 429 döndürüyor (şifre
+    kontrolünden ÖNCE, bcrypt maliyetine bile girmeden). Login iki ayrı
+    bucket kullanıyor — `login_id:{eposta}` (5 deneme/15dk, tek hesabı hedef
+    alan saldırıya karşı) ve `login_ip:{ip}` (20 deneme/15dk, tek kaynaktan
+    çok hesaba saldırıya karşı); paylaşım linki `share_unlock:{linkId}:{ip}`
+    (8/15dk) kullanıyor — link başına değil link+ip başına, çünkü aynı linki
+    paylaşan birden fazla gerçek alıcı birbirini kilitlememeli. Başarılı
+    girişte kendi bucket'ı temizleniyor (`RateLimiter::clear()`), yoksa
+    doğru şifreyi giren biri az önceki yanlış denemeler yüzünden kilitli
+    kalabilirdi.
+
+41. **Yukarıdaki RateLimiter'ın CANLIDA ilk denemesi tamamen sessiz şekilde
+    işe yaramadı — 6 art arda yanlış giriş denemesi hep 401 döndürdü, 429 hiç
+    tetiklenmedi.** Kök neden, `bootstrap.php`'nin en üstündeki
+    `date_default_timezone_set('Europe/Istanbul')` yorumunun zaten uyardığı
+    AYNI sınıf hata: bu VPS'te MySQL'in kendi saati **UTC** (`@@session.time_zone
+    = SYSTEM`, sunucu saati UTC), ama `RateLimiter::countRecent()` pencere
+    sınırını (`cutoff`) PHP'nin `date()` fonksiyonuyla hesaplıyordu — o da
+    PHP'nin zorladığı Europe/Istanbul (UTC+3) saatini kullanıyor. Sonuç: her
+    `guard()` çağrısı, "şimdi"yi gerçek UTC'den ~3 saat ileride sanıyor, bu
+    yüzden az önce UTC ile eklenmiş satırı bile "süresi dolmuş" sanıp siliyor
+    — yani sayaç neredeyse hiç birikemiyor. Yerel geliştirme ortamında bu hiç
+    fark edilmedi çünkü bu Mac'in sistem saati zaten Europe/Istanbul, yani
+    PHP ile yerel MySQL'in saatleri tesadüfen örtüşüyordu; canlıda VPS'in
+    sistem saati UTC olduğu için ayrıştı. **Düzeltme**: hem yazma
+    (`recordFailure`, `created_at`'i artık DB'nin `DEFAULT CURRENT_TIMESTAMP`'ine
+    bırakmıyor, açıkça `gmdate()` ile UTC yazıyor) hem okuma (`countRecent`'in
+    `cutoff` hesabı da `gmdate()`) tarafı UTC'de, birbirinden bağımsız her iki
+    sunucunun yerel saat ayarından — sabit bir referansta buluşuyor. **Ders**:
+    bir tabloya PHP tarafından yazılan bir zaman damgası, aynı tabloda başka
+    bir PHP çağrısıyla karşılaştırılacaksa, ikisi de `gmdate()`/UTC kullanmalı
+    — `date()` (yerel saat) ile DB'nin kendi `DEFAULT CURRENT_TIMESTAMP`'i
+    (DB'nin kendi saati) asla aynı varsayımla güvenilemez, ikisi de farklı
+    sunucularda farklı ayarlanmış olabilir. Bu tür bir hatayı canlıda fark
+    etmenin tek yolu gerçek bir uçtan uca deneme oldu (kod incelemesiyle
+    görülemezdi) — bkz. proje kuralı: her önemli değişiklik gerçek ortamda
+    doğrulanmalı.
+
+42. **Güvenlik response header'ları iki ayrı yerde ayarlanıyor, birbirine
+    karıştırılmamalı.** `api/bootstrap.php` her API yanıtına (JSON, dosya
+    indirme) `X-Content-Type-Options`/`X-Frame-Options`/`Referrer-Policy`/HSTS
+    ekliyor — ama CSP'yi burada AYARLAMIYOR, çünkü gerçek HTML sayfasını
+    (React uygulamasının kendisi) bu PHP script'i değil, Apache doğrudan
+    `public_html`'den sunuyor; `api/` tamamen ayrı bir alt yol/istek. Asıl
+    sayfayı çerçeveleme/script çalıştırma kısıtlarının (CSP,
+    `frame-ancestors`) etkili olacağı yer `public/.htaccess` — Vite build'i bu
+    dosyayı `dist/`'e olduğu gibi kopyaladığı için mevcut deploy akışına
+    (`tar dist/ -> public_html`) hiç dokunmadan otomatik gidiyor. CSP,
+    uygulamanın gerçekten kullandığı harici kaynaklara göre kuruldu: Google
+    Fonts (`fonts.googleapis.com`/`fonts.gstatic.com`, `index.css`'teki
+    `@import`), Cloudflare chunk-relay Worker
+    (`ruf-upload-relay.muslumkazdal.workers.dev`, büyük dosya yüklemesi),
+    `style-src 'unsafe-inline'` (arkaplan/kolaj özelleştirmesinin dinamik
+    inline `style={{...}}` renk/font/boyut değerleri için gerekli). **Deploy
+    önce Report-Only header'la yapıldı** (`Content-Security-Policy-Report-Only`
+    — hiçbir şeyi bloklamaz, sadece konsola loglar), gerçek production'da
+    Playwright ile gezilip konsolda tek bir gerçek ihlal bulundu:
+    `static.cloudflareinsights.com` (Cloudflare'in zone kendi proxy'sinden
+    otomatik enjekte ettiği analytics beacon script'i — bizim kodumuzdan
+    gelmiyor) — bu `script-src`'e eklenip tekrar Report-Only'de doğrulandı
+    (sıfır ihlal), ancak SONRA gerçek `Content-Security-Policy` (enforcing)
+    header'ına geçildi. Bu iki aşamalı yaklaşım kasıtlı: yanlış bir CSP tüm
+    siteyi (login sayfası dahil) beyaz ekrana düşürebilir, Report-Only aşaması
+    bunu sıfır riskle canlıda test etmeyi sağladı.
