@@ -28,7 +28,12 @@ final class RateLimiter
     /** Records one failed attempt against $bucketKey. Call only on a WRONG credential/password. */
     public static function recordFailure(string $bucketKey): void
     {
-        Db::execute('INSERT INTO login_throttle (bucket_key) VALUES (?)', [$bucketKey]);
+        // created_at is set explicitly (gmdate, UTC) rather than left to the
+        // column's own DEFAULT CURRENT_TIMESTAMP — see the timezone note on
+        // countRecent() below for why relying on the DB's own clock here is
+        // exactly the bug this app already got bitten by once (folders.php
+        // deleted_at, see bootstrap.php's date_default_timezone_set comment).
+        Db::execute('INSERT INTO login_throttle (bucket_key, created_at) VALUES (?, ?)', [$bucketKey, gmdate('Y-m-d H:i:s')]);
     }
 
     /** Clears a bucket's history — call on a SUCCESSFUL auth so a legitimate
@@ -41,10 +46,22 @@ final class RateLimiter
 
     /** Counts attempts within the window and, as a side effect, deletes this
         bucket's rows that fell out of it — keeps the table from growing
-        unbounded without needing a separate cleanup cron. */
+        unbounded without needing a separate cleanup cron.
+
+        Uses gmdate() (UTC), NOT date() — bootstrap.php sets
+        date_default_timezone_set('Europe/Istanbul') for display purposes
+        elsewhere in the app, but this VPS's MySQL runs its own clock in UTC
+        (session time_zone = SYSTEM). Comparing a date()-formatted
+        Istanbul-time cutoff (UTC+3) against created_at values that MySQL
+        actually stores in UTC made every row look ~3 hours "too old" and get
+        deleted on the very next request — confirmed live: 6 failed login
+        attempts against production only ever left 1 row per bucket instead
+        of accumulating, so the lockout never triggered. gmdate() on both
+        the write side (recordFailure) and read side (here) keeps both ends
+        on the same clock regardless of either server's local timezone. */
     private static function countRecent(string $bucketKey, int $windowSeconds): int
     {
-        $cutoff = date('Y-m-d H:i:s', time() - $windowSeconds);
+        $cutoff = gmdate('Y-m-d H:i:s', time() - $windowSeconds);
         Db::execute('DELETE FROM login_throttle WHERE bucket_key = ? AND created_at < ?', [$bucketKey, $cutoff]);
         $row = Db::queryOne('SELECT COUNT(*) AS c FROM login_throttle WHERE bucket_key = ?', [$bucketKey]);
         return (int) ($row['c'] ?? 0);
