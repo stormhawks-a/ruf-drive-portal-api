@@ -18,12 +18,26 @@ require __DIR__ . '/lib/Response.php';
 require __DIR__ . '/lib/Ids.php';
 require __DIR__ . '/lib/Auth.php';
 require __DIR__ . '/lib/AuditLogger.php';
+require __DIR__ . '/lib/RateLimiter.php';
 require __DIR__ . '/lib/Scope.php';
 require __DIR__ . '/lib/Crypto.php';
 require __DIR__ . '/lib/GoogleOAuth.php';
 require __DIR__ . '/lib/GoogleDriveClient.php';
 require __DIR__ . '/lib/ZipStreamer.php';
 require __DIR__ . '/lib/ChunkRelayTicket.php';
+
+// Defense-in-depth headers for every API response (JSON and file streams
+// alike) — the actual HTML page's headers (CSP, frame-ancestors) live in the
+// frontend's own .htaccess (public/.htaccess) since Apache serves that
+// directly and never routes through this PHP script; nosniff/no-referrer
+// still matter here too since a browser can navigate straight to a download
+// URL or an inline preview.
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: SAMEORIGIN');
+header('Referrer-Policy: strict-origin-when-cross-origin');
+if (Config::get('secure_cookies')) {
+    header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
+}
 
 set_exception_handler(function (Throwable $e): void {
     error_log($e->getMessage() . "\n" . $e->getTraceAsString());

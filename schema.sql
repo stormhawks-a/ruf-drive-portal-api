@@ -241,4 +241,20 @@ CREATE TABLE IF NOT EXISTS file_uploads (
   KEY idx_file_uploads_owner (owner_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- ---------------------------------------------------------------------------
+-- login_throttle: brute-force korumasi icin basarisiz giris/paylasim-sifresi
+-- denemelerinin kaydi (bkz. api/lib/RateLimiter.php). Her basarisiz denemede
+-- bir satir eklenir; belirli bir "bucket_key" (orn. "login_id:eposta@..." veya
+-- "share_unlock:linkId:ip") icin son N dakikadaki satir sayisi esigi asarsa
+-- istek 429 ile reddedilir. Eski satirlar RateLimiter::guard() her cagrildiginda
+-- kendi penceresinin disina cikanlar icin otomatik temizlenir, ayri bir cron
+-- gerekmez.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS login_throttle (
+  id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  bucket_key VARCHAR(191) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_login_throttle_bucket (bucket_key, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET FOREIGN_KEY_CHECKS = 1;

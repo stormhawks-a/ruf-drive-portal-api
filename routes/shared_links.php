@@ -364,14 +364,23 @@ function shared_links_unlock(array $params): void
     $id = $params['id'];
     $link = shared_links_load_valid($id);
 
+    // Bucketed by link + IP (not by link alone) so many legitimate recipients
+    // guessing/typing a password for the SAME shared link from different
+    // places don't lock each other out — only repeated wrong guesses from one
+    // source do.
+    $bucket = 'share_unlock:' . $id . ':' . RateLimiter::clientIp();
+    RateLimiter::guard($bucket, 8, 900);
+
     $body = Response::body();
     $password = (string) ($body['password'] ?? '');
     // A password-less link has nothing to check here (the frontend never calls this
     // endpoint for one — shared_links_get() unlocks it directly — but a stray direct
     // call must not be unconditionally rejected just because there's no password set).
     if ($link['password_hash'] !== null && !Auth::verify($password, $link['password_hash'])) {
+        RateLimiter::recordFailure($bucket);
         Response::error('Şifre yanlış.', 401);
     }
+    RateLimiter::clear($bucket);
 
     Auth::loginShareLink($id);
 
