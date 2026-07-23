@@ -1099,3 +1099,27 @@ repo.
     header'ına geçildi. Bu iki aşamalı yaklaşım kasıtlı: yanlış bir CSP tüm
     siteyi (login sayfası dahil) beyaz ekrana düşürebilir, Report-Only aşaması
     bunu sıfır riskle canlıda test etmeyi sağladı.
+
+43. **Frontend deploy'undaki `chown -R ... public_html` komutu `config.php`'yi
+    okunamaz hale getirip TÜM canlı sistemi (giriş + paylaşım linkleri) 500
+    ile kesintiye uğrattı — bir daha ASLA `public_html`'i bütün olarak
+    recursive chown'lama.** `backend/` klasörü (git checkout, `deploy-backend.sh`
+    ile güncellenen) `public_html`'in İÇİNDE yaşıyor — frontend deploy'u
+    normalde sadece `assets/`, `index.html`, `favicon.svg`, `.htaccess`'i
+    silip yeniden yazıyor, ama sondaki `chown -R $(stat -c %U public_html):www-data
+    public_html` adımı yanlışlıkla TÜM ağacı (backend dahil) tarıyordu.
+    `config.php` özellikle sıkı izinli (`640`, `muslum:www-data` — "other"
+    hiç okuyamaz, kasıtlı: sırlar burada), ve bu domain'in PHP-FPM havuzu
+    `user:user` sistem hesabıyla çalışıyor (`/etc/php/8.3/fpm/pool.d/teslim.workonruf.com.conf`)
+    — `user`, ne `config.php`'nin sahibi ne de grubu, bu yüzden chown
+    `config.php`'nin sahibini `user`'dan `muslum`'a çevirince PHP-FPM dosyayı
+    okuyamaz oldu (`Permission denied`), her istek `Config::load()`'da patladı.
+    Belirti tam olarak "doğru şifreyle bile 500" ve "paylaşım linkleri de
+    aynı" idi — ikisi de aynı `bootstrap.php` -> `Config::get()` zincirinden
+    geçiyor. **Kalıcı düzeltme, bir daha olmasın diye**: frontend deploy'u
+    SADECE kendi ürettiği dosyaları (`assets/`, `index.html`, `favicon.svg`,
+    `public/.htaccess`'ten gelen `.htaccess`) hedeflemeli, `public_html`'in
+    kökünü recursive chown'lamamalı — `backend/`'e hiç dokunmamalı. Gerçek
+    hata `/home/user/web/teslim.workonruf.com/logs/teslim.workonruf.com.error.log`'da
+    saniyeler içinde bulundu (`tail` + zaman damgası karşılaştırması) — bkz.
+    systematic-debugging: önce gerçek hata mesajını oku, sonra düzelt.
