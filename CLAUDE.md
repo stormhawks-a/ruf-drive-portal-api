@@ -1143,3 +1143,28 @@ repo.
     `google.redirect_uri` (`https://teslim.workonruf.com/backend/oauth_callback.php`)
     Google Cloud Console'daki "Authorized redirect URIs" ile birebir eşleşmek
     zorunda, aksi halde Google `redirect_uri_mismatch` hatası verir.
+
+45. **Frontend deploy'u artık ASLA `public_html`'i bütün olarak recursive
+    chown'lamıyor (bkz. gotcha #43'ün sebep olduğu kesinti) — sadece bilinen
+    frontend çıktılarını hedefliyor.** Güvenli desen: `assets/` klasörüne
+    `chown -R`, ama `index.html`/`favicon.svg`/`.htaccess` gibi tekil
+    dosyalara TEK TEK (recursive olmadan) chown. `backend/`'e hiçbir zaman
+    dokunulmuyor. Her deploy'dan sonra `config.php`'nin sahipliğinin
+    değişmediğini (`ls -la backend/config.php`, owner hâlâ `user` olmalı)
+    doğrulamak ek bir güvenlik adımı.
+
+46. **Drive bağlantısı koptuğunda (OAuth token iptali gibi) artık personel
+    paneli sessiz kalmıyor — `GET /diagnostics/drive-health` +
+    `DriveInterface.tsx`'teki kırmızı banner.** 2026-07-27'deki kesinti
+    (gotcha #44) sadece bir müşterinin "dosya indiremiyorum" şikayetiyle
+    fark edildi — hiçbir şey personele proaktif olarak haber vermiyordu.
+    `diagnostics_drive_health` sadece `GoogleOAuth::getAccessToken()`'ı
+    çağırıyor (gerçek bir dosyaya hiç dokunmadan, en ucuz olası kontrol —
+    tam olarak token öldüğünde İLK patlayan çağrı) ve `{ok: bool, error?}`
+    döndürüyor; ADMIN/EDITOR'a açık, CUSTOMER'a değil. Frontend tarafı
+    `isStaff` için mount'ta ve her 5 dakikada bir kontrol ediyor; hata varsa
+    üstte tüm sayfa genişliğinde kırmızı bir banner çıkıyor, ADMIN için
+    doğrudan `/backend/oauth_authorize.php`'ye giden bir link de var
+    (EDITOR'da link yok çünkü o endpoint zaten ADMIN-only). Yerelde gerçek
+    tarayıcı testiyle doğrulandı — yerel ortamın zaten bilinen bozuk Drive
+    token'ı sayesinde banner'ın gerçekten tetiklendiği canlı olarak görüldü.
