@@ -154,7 +154,29 @@ function diagnostics_echo_upload(array $params): void
     ]);
 }
 
+/**
+ * Cheap Drive connectivity check for the staff panel's own warning banner
+ * (see DriveInterface.tsx) — the 2026-07-27 outage (revoked/expired
+ * refresh_token, see api/CLAUDE.md gotcha #44) was only discovered because a
+ * customer complained that downloads were failing; nothing surfaced it to
+ * staff proactively. This just asks for a fresh Drive access token — the
+ * exact call that fails first when the refresh_token is dead — without
+ * touching any real file, so staff can be warned the moment it breaks
+ * instead of the next time someone tries to download something.
+ */
+function diagnostics_drive_health(array $params): void
+{
+    Auth::requireRole(['ADMIN', 'EDITOR']);
+    try {
+        GoogleOAuth::getAccessToken();
+        Response::json(['ok' => true]);
+    } catch (Throwable $e) {
+        Response::json(['ok' => false, 'error' => $e->getMessage()]);
+    }
+}
+
 return [
     ['GET', '#^/diagnostics/upload-speed-test$#', 'diagnostics_upload_speed_test'],
     ['POST', '#^/diagnostics/echo-upload$#', 'diagnostics_echo_upload'],
+    ['GET', '#^/diagnostics/drive-health$#', 'diagnostics_drive_health'],
 ];
