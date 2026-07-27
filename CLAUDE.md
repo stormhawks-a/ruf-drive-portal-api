@@ -1123,3 +1123,23 @@ repo.
     hata `/home/user/web/teslim.workonruf.com/logs/teslim.workonruf.com.error.log`'da
     saniyeler içinde bulundu (`tail` + zaman damgası karşılaştırması) — bkz.
     systematic-debugging: önce gerçek hata mesajını oku, sonra düzelt.
+
+44. **`api/oauth_authorize.php` ve `api/oauth_callback.php` (Google Drive
+    tek-seferlik yetkilendirme akışı) hiç git'e commit edilmemişti — sadece
+    sunucuda vardılar, ve bir noktada (muhtemelen bir "gereksiz dosyaları
+    temizle" hamlesinde) tamamen kaybolmuşlardı.** Bunun fark edildiği an:
+    production'daki `refresh_token` Google tarafından iptal/süresi dolmuş
+    olarak işaretlendi (`invalid_grant: Token has been expired or revoked`,
+    `GoogleOAuth::getAccessToken()`'dan), yani TÜM Drive işlemleri (dosya
+    listeleme çalışıyor çünkü DB'den geliyor, ama indirme/önizleme/yükleme
+    hep Drive'a gittiği için) 500 vermeye başladı — ama yeniden yetkilendirme
+    scripti yoktu, yeniden oluşturmak gerekti. Artık her ikisi de repo'da
+    (`api/oauth_authorize.php`, `api/oauth_callback.php`, ikisi de
+    `Auth::requireRole('ADMIN')` ile korumalı — yoksa herkes uygulamanın
+    Drive depolamasını kendi Google hesabına yönlendirebilirdi). **Bu tür bir
+    token iptali/süre dolumu tekrar olursa**: yönetici olarak giriş yapıp aynı
+    tarayıcıda `/backend/oauth_authorize.php`'yi ziyaret etmek yeterli — kod
+    tarafında başka hiçbir şey yapmaya gerek yok. `config.php`'deki
+    `google.redirect_uri` (`https://teslim.workonruf.com/backend/oauth_callback.php`)
+    Google Cloud Console'daki "Authorized redirect URIs" ile birebir eşleşmek
+    zorunda, aksi halde Google `redirect_uri_mismatch` hatası verir.
