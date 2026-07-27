@@ -1168,3 +1168,18 @@ repo.
     (EDITOR'da link yok çünkü o endpoint zaten ADMIN-only). Yerelde gerçek
     tarayıcı testiyle doğrulandı — yerel ortamın zaten bilinen bozuk Drive
     token'ı sayesinde banner'ın gerçekten tetiklendiği canlı olarak görüldü.
+
+47. **Müşteri logosu (`users.logo_drive_file_id`/`logo_mime_type`) — `avatar_url`'den kasıtlı olarak
+    ayrı bir mekanizma.** `avatar_url` dairesel bir rozet içinde (kırpılarak) gösteriliyor;
+    müşteri logosu ise KIRPILMADAN, tam haliyle gösterilmeli (kullanıcı isteği) — bu yüzden
+    ayrı sütunlar, ayrı Drive klasörü ("Musteri Logolari", `background_settings_resolve_drive_folder`
+    ile aynı lazy-create+app_settings-cache deseni), ayrı `POST/DELETE/GET /users/{id}/logo`
+    uçları. PNG/JPEG/SVG kabul ediliyor. `users_list` `logo_drive_file_id`'yi asla client'a
+    göndermiyor (`background_settings_serialize`'daki aynı ilke) — sadece `has_logo` boolean,
+    frontend URL'i kendisi kuruyor (`${API_BASE}/users/{id}/logo?v={updatedAt}`). `?v=` cache-buster
+    `users.updated_at`'ten geliyor (zaten `ON UPDATE CURRENT_TIMESTAMP`) — bir logo değişince/kaldırılınca
+    otomatik olarak farklı bir URL olur, ayrı bir cache-invalidation mekanizması kurmaya gerek kalmadı.
+    Gerçek Drive'a yazan bir özellik olduğu için yerelde tam test edilemedi (bilinen 502 kısıtı) —
+    production'da tek kullanımlık `zz_` editör+müşteri hesabıyla uçtan uca doğrulandı (PNG yükleme,
+    SVG ile değiştirme, byte-eşleşmesi, kaldırma, gerçek tarayıcıda görsel doğrulama), sonra hem DB
+    hem gerçek Drive dosyaları temizlendi.
