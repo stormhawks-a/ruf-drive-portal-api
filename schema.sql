@@ -23,6 +23,11 @@ CREATE TABLE IF NOT EXISTS users (
   password_encrypted TEXT NULL,
   role          ENUM('ADMIN','EDITOR','CUSTOMER') NOT NULL,
   avatar_url    VARCHAR(500) NULL,
+  -- Customer logo (PNG/JPEG/SVG), stored on Drive like everything else — shown
+  -- full/uncropped in the customer card, unlike avatar_url's circular badge.
+  -- NULL means "no logo uploaded", card falls back to initials.
+  logo_drive_file_id VARCHAR(120) NULL,
+  logo_mime_type     VARCHAR(100) NULL,
   folder_id     VARCHAR(40)  NULL,
   is_active     TINYINT(1)   NOT NULL DEFAULT 1,
   created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,

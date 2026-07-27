@@ -3,8 +3,147 @@
 function users_list(array $params): void
 {
     Auth::requireRole(['ADMIN', 'EDITOR']);
-    $rows = Db::query('SELECT id, name, email, username, role, avatar_url, folder_id, is_active, created_at FROM users ORDER BY created_at ASC');
+    $rows = Db::query(
+        'SELECT id, name, email, username, role, avatar_url, folder_id, is_active, created_at, updated_at, logo_drive_file_id
+         FROM users ORDER BY created_at ASC'
+    );
+    // logo_drive_file_id is a raw Drive id — never sent to the client (same
+    // principle as background_settings_serialize); the frontend only needs
+    // to know whether a logo exists, and builds the streaming URL itself.
+    $rows = array_map(function (array $row): array {
+        $row['has_logo'] = $row['logo_drive_file_id'] !== null;
+        unset($row['logo_drive_file_id']);
+        return $row;
+    }, $rows);
     Response::json(['users' => $rows]);
+}
+
+/** Lazily creates (once) a dedicated Drive folder for customer logos, caching
+    its id in app_settings — same pattern as background_settings_resolve_drive_folder. */
+function users_resolve_logo_drive_folder(): ?string
+{
+    $setting = Db::queryOne('SELECT value FROM app_settings WHERE `key` = ?', ['customer_logo_drive_folder_id']);
+    if ($setting !== null && $setting['value'] !== null) {
+        return $setting['value'];
+    }
+
+    $rootSetting = Db::queryOne('SELECT value FROM app_settings WHERE `key` = ?', ['drive_root_folder_id']);
+    $rootId = $rootSetting['value'] ?? null;
+
+    try {
+        $folderId = GoogleDriveClient::createFolder('Musteri Logolari', $rootId);
+    } catch (Throwable $e) {
+        error_log('Musteri logolari Drive klasoru olusturulamadi: ' . $e->getMessage());
+        return null;
+    }
+
+    Db::execute(
+        'INSERT INTO app_settings (`key`, `value`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)',
+        ['customer_logo_drive_folder_id', $folderId]
+    );
+    return $folderId;
+}
+
+/** Uploads/replaces a customer's logo — full image is preserved (no cropping),
+    unlike avatar_url which the UI renders inside a circular initials badge.
+    PNG/JPEG/SVG only. Editors may only do this for CUSTOMER accounts, same
+    boundary as every other users.php write. */
+function users_upload_logo(array $params): void
+{
+    $actor = Auth::requireRole(['ADMIN', 'EDITOR']);
+    $id = $params['id'];
+    $target = Db::queryOne('SELECT * FROM users WHERE id = ?', [$id]);
+    if ($target === null) {
+        Response::error('Kullanıcı bulunamadı.', 404);
+    }
+    if ($actor['role'] === 'EDITOR' && $target['role'] !== 'CUSTOMER') {
+        Response::error('Bu işlem için yetkiniz yok.', 403);
+    }
+
+    if (!isset($_FILES['file']) || $_FILES['file']['error'] !== UPLOAD_ERR_OK) {
+        Response::error('Logo yüklenemedi.', 422);
+    }
+    $uploaded = $_FILES['file'];
+    $mimeType = (string) ($uploaded['type'] ?: '');
+    $allowedMimes = ['image/png', 'image/jpeg', 'image/svg+xml'];
+    if (!in_array($mimeType, $allowedMimes, true)) {
+        Response::error('Sadece PNG, JPG veya SVG dosyaları desteklenir.', 422);
+    }
+
+    $driveParentId = users_resolve_logo_drive_folder();
+    if ($driveParentId === null) {
+        Response::error('Drive bağlantısı kurulamadı, tekrar deneyin.', 502);
+    }
+
+    $contents = file_get_contents($uploaded['tmp_name']);
+    try {
+        $driveFileId = GoogleDriveClient::uploadFile($uploaded['name'], $driveParentId, $mimeType, $contents);
+    } catch (Throwable $e) {
+        error_log('Musteri logosu yukleme basarisiz: ' . $e->getMessage());
+        Response::error('Logo Drive\'a yüklenemedi, tekrar deneyin.', 502);
+    }
+
+    $oldDriveFileId = $target['logo_drive_file_id'];
+    Db::execute('UPDATE users SET logo_drive_file_id = ?, logo_mime_type = ? WHERE id = ?', [$driveFileId, $mimeType, $id]);
+    if ($oldDriveFileId !== null) {
+        try {
+            GoogleDriveClient::deleteFile($oldDriveFileId);
+        } catch (Throwable $e) {
+            error_log('Eski musteri logosu Drive\'dan silinemedi: ' . $e->getMessage());
+        }
+    }
+    AuditLogger::log($actor['id'], $actor['name'], $actor['role'], 'PERMISSION_CHANGE', "Müşteri logosu güncellendi: {$target['name']}");
+
+    $updated = Db::queryOne('SELECT updated_at FROM users WHERE id = ?', [$id]);
+    Response::json(['ok' => true, 'updatedAt' => $updated['updated_at']]);
+}
+
+/** Removes a customer's logo — the card falls back to the initials badge again. */
+function users_remove_logo(array $params): void
+{
+    $actor = Auth::requireRole(['ADMIN', 'EDITOR']);
+    $id = $params['id'];
+    $target = Db::queryOne('SELECT * FROM users WHERE id = ?', [$id]);
+    if ($target === null) {
+        Response::error('Kullanıcı bulunamadı.', 404);
+    }
+    if ($actor['role'] === 'EDITOR' && $target['role'] !== 'CUSTOMER') {
+        Response::error('Bu işlem için yetkiniz yok.', 403);
+    }
+
+    if ($target['logo_drive_file_id'] !== null) {
+        try {
+            GoogleDriveClient::deleteFile($target['logo_drive_file_id']);
+        } catch (Throwable $e) {
+            error_log('Musteri logosu Drive\'dan silinemedi: ' . $e->getMessage());
+        }
+    }
+    Db::execute('UPDATE users SET logo_drive_file_id = NULL, logo_mime_type = NULL WHERE id = ?', [$id]);
+    AuditLogger::log($actor['id'], $actor['name'], $actor['role'], 'PERMISSION_CHANGE', "Müşteri logosu kaldırıldı: {$target['name']}");
+    Response::json(['ok' => true]);
+}
+
+/** Streams a customer's logo — same dual-path viewer check as files_download/
+    background_settings (real login OR unlocked share-link session), since a
+    logo is shown in staff-facing screens and could reasonably appear on
+    customer-facing ones too. */
+function users_stream_logo(array $params): void
+{
+    $id = $params['id'];
+    if (Auth::currentUser() === null && Auth::currentShareLinkId() === null) {
+        Response::error('Oturum açmanız gerekiyor.', 401);
+    }
+    $target = Db::queryOne('SELECT logo_drive_file_id, logo_mime_type FROM users WHERE id = ?', [$id]);
+    if ($target === null || $target['logo_drive_file_id'] === null) {
+        Response::error('Logo bulunamadı.', 404);
+    }
+    header('Content-Type: ' . ($target['logo_mime_type'] ?: 'application/octet-stream'));
+    // Safe to cache for a while — the frontend appends ?v={updatedAt} to the
+    // URL, so a replaced/removed logo is always a distinct URL, never a stale
+    // cache hit on this one.
+    header('Cache-Control: private, max-age=86400');
+    GoogleDriveClient::streamFile($target['logo_drive_file_id']);
+    exit;
 }
 
 /** Admin-only, single-user, on-demand — deliberately not bundled into users_list
@@ -196,6 +335,14 @@ function users_delete(array $params): void
     // shared_links.customer_user_id / created_by_id both have NO ACTION delete rules.
     Db::execute('DELETE FROM shared_links WHERE customer_user_id = ? OR created_by_id = ?', [$id, $id]);
 
+    if ($target['logo_drive_file_id'] !== null) {
+        try {
+            GoogleDriveClient::deleteFile($target['logo_drive_file_id']);
+        } catch (Throwable $e) {
+            error_log('Musteri logosu silinemedi (musteri silme): ' . $e->getMessage());
+        }
+    }
+
     if ($target['folder_id'] !== null) {
         // Best-effort: the customer's Drive folder may already be gone (e.g. deleted
         // by hand from Drive directly), so a 404 here must not block the DB cleanup.
@@ -243,4 +390,7 @@ return [
     ['PUT', '#^/users/(?P<id>[a-zA-Z0-9_]+)$#', 'users_update'],
     ['DELETE', '#^/users/(?P<id>[a-zA-Z0-9_]+)$#', 'users_delete'],
     ['GET', '#^/users/(?P<id>[a-zA-Z0-9_]+)/password$#', 'users_get_password'],
+    ['POST', '#^/users/(?P<id>[a-zA-Z0-9_]+)/logo$#', 'users_upload_logo'],
+    ['DELETE', '#^/users/(?P<id>[a-zA-Z0-9_]+)/logo$#', 'users_remove_logo'],
+    ['GET', '#^/users/(?P<id>[a-zA-Z0-9_]+)/logo$#', 'users_stream_logo'],
 ];
